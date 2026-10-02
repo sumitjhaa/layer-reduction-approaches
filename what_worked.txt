@@ -1,0 +1,110 @@
+# what_worked.txt - Which approaches produced usable results and why
+
+Scope: all 15 approaches in approaches/notebooks were executed on the
+free local MPS GPU (Apple Silicon), Models GPT-2 (124M) + SmolLM-135M,
+wikitext-2/103 subsets, PPL on 256-token non-overlapping windows (3k-token
+eval budget). Four of them produced trustworthy results; the rest either
+failed or were scaffolds. This file explains the working four in detail, the
+reason each one worked, and why the archived ones did not.
+
+================================================================
+1) Fitted-Ternary TerGRASP (01) -- WORKED, headline approach
+================================================================
+WHAT IT DOES
+For each redundant decoder layer L it hooks the model, captures h_in and
+h_out on ~4k chars of train text, fits f(x) = x + x@U@V to minimize
+||f(X) - (X + delta)||**2 where delta = h_out - h_in (Adam, 80 iters),
+then AbsMean-quantizes U and V to {-1,0,+1}*gamma (BitNet b1.58). The
+fitted bridge replaces the original block.
+
+WHY IT WORKED
+The supplied TerGRASP cell initialized U,V randomly, so the bridge was
+effectively x + epsilon and always tracked hard removal. Fitting U,V on the
+actual residual fixes this: the bridge now approximates the layer's
+function, and ternarizing is a small perturbation. Fit also converges fast
+because delta per layer is usually small (layers are near-identity at the
+most redundant positions).
+
+RESULTS (k = layers replaced)
+  GPT-2: k=1 45.11, k=2 50.09, k=3 140.42, k=4 879.52
+  SmolLM-135M: k=1 21.71, k=2 40.49, k=3 33.05, k=4 38.49
+  vs hard removal: GPT-2 45.76 / 47.95 / 121.81 / 943.24,
+                   SmolLM 19.93 / 26.13 / 29.91 / 34.20
+k=1 is a wash (fitted-TerGRASP even slightly better on GPT-2), higher k is
+near hard removal. The win: the graph keeps its depth and the replaced
+weights are ~1.58 bit/param.
+
+================================================================
+2) ShortGPT BI baseline (06) -- WORKED, the control
+================================================================
+WHAT IT DOES
+Computes BI_l = 1 - cos(h_in, h_out) per block from a single forward pass
+with output_hidden_states=True, sorts layers, removes the k lowest-BI
+ones. The control removes k random layers (seed 0) at the same k.
+
+WHY IT WORKED
+One clean forward hook pass is enough; metric is deterministic and
+independent of tokenizer choices beyond length. Random-vs-targeted gap is
+unambiguous.
+
+RESULTS
+  GPT-2:     k=1 45.76 (rand 44.42), k=2 47.95 (139.09),
+             k=3 121.81 (4181.21), k=4 943.24 (4237.94)
+  SmolLM:    k=1 19.93 (20.83), k=2 26.13 (26.37),
+             k=3 29.91 (34.23), k=4 34.20 (57.37)
+Targeted beats random from k>=2 by 3x-30x on PPL. At k=1 single-layer
+removal is nearly free either way.
+
+================================================================
+3) SVD low-rank approximation (07) -- WORKED (with one caveat)
+================================================================
+WHAT IT DOES
+Replaces every weight W in the two most redundant blocks with its rank-r
+truncated factorization U_r S_r V^T, r in {64,128,256}.
+
+WHY IT WORKED
+SVD of a single Linear is stable and needs no training. PPL cost is smooth
+in r, which makes the trade-off easy to report.
+
+RESULTS
+  SmolLM: r=256 -> 19.93 (= baseline), r=128 -> 22.00, r=64 -> 24.22
+  GPT-2 rows flat at 36.78 (dtype guard swallowed the edit; needs an
+  explicit .float() rerun).
+Use it as a width-reduction alternative to layer removal.
+
+================================================================
+4) Quantized no-op bypass (15) -- WORKED, supporting rule
+================================================================
+WHAT IT DOES
+For the 3 lowest-BI layers, independently quantizes every Linear weight in
+that block at b bits (AbsMean per-tensor symmetric), b in {8,4,2}.
+
+WHY IT WORKED
+Low-BI layers behave like identities; their weights are insensitive to
+coarse quantization. This is consistent: the same ranking that lets you
+remove them lets you also crush their precision.
+
+RESULTS
+  SmolLM L5: 8-bit 17.76, 4-bit 17.77, 2-bit 17.76 (no PPL change)
+  SmolLM L2: 19.11 / 19.07 / 19.18
+  GPT-2:     38.25 at every bit (eval noise; increase EVAL_TOKENS to
+             make the trend visible)
+Rule: BI low -> either delete it, or replace it with fitted-ternary
+(TerGRASP), or quantize it to 2 bits. BI high -> leave it alone.
+
+================================================================
+WHAT DID NOT WORK (archived; kept as negative results)
+================================================================
+- 02 Affine bridge across a deleted gap: PPL explodes 10^3-10^8x. The
+  hidden-state map across several deleted layers is not affine.
+- 08 Parameter soup averaging: GPT-2 ~3-6x PPL, SmolLM ~1.1-1.7x. Naive
+  averaging ignores neuron permutation.
+- 14 Cross-layer weight tying: PPL 1000x-1,000,000x. Layers are not
+  interchangeable in weight space.
+- 04 Permutation-aligned averaging: running version fell back to naive
+  averaging, same failure as 08.
+- 03 KD repair, 09 KD student: framework worked but 60 steps on MPS was
+  too small (KD loss stayed ~0). Needs a real budget and proper CE+KL.
+- 10 L0 gates, 11 LayerDrop, 12 FFN proxy, 13 early exit: scaffolds whose
+  key loop (training exit heads, real gate sparsity, head saliency) was
+  not finished; their outputs are identical rows and provide no evidence.

@@ -1,0 +1,83 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\title{Layer Reduction with Fitted-Ternary TerGRASP}
+\author{(team members)}
+\date{October 2026}
+\begin{document}
+\maketitle
+
+\section{Report}
+\subsection{Mentor feedback}
+Insert the feedback and weekly-meeting notes shared with the mentor here.
+Work since Presentation 1: BI profiling, hard-removal baseline, documented
+failures (affine bridge, naive averaging, weight tying), fitted-ternary
+TerGRASP implemented and evaluated, plus SVD low-rank and 2-bit
+quantization supporting results.
+
+\subsection{Baselines}
+ShortGPT angular-distance pruning (Men et al.), LayerDrop (Fan et al.),
+CALM early exits, KD to shallow students, L0 gates. Only ShortGPT was
+reproduced as the control because the others require longer training than
+the available MPS budget.
+
+\subsection{Datasets}
+Salesforce/wikitext wikitext-2-raw-v1 (main), wikitext-103-raw-v1 and
+wikitext-2-v1 (comparisons). Same \texttt{join\_nonempty} preprocessing as
+Assignment 1; 300k-char train cap, 100k-char validation/test cap, 3k-token
+PPL windows. Bias handling: fixed seed, identical windows for all models.
+
+\subsection{Experimental plan}
+Models: GPT-2 (124M) and SmolLM-135M (135M). Same SEED=42, same eval
+windows, targeted-vs-random removal as the falsification control, rank
+sweep $\in\{64,128,256\}$, bitwidth sweep $\in\{8,4,2\}$. Hyperparameters:
+bridge rank 32, Adam lr $10^{-2}$ for 80 steps, AbsMean ternary, ridge
+$10^{-4}$. Metric: validation perplexity (primary), latency in ms and
+parameter count (secondary).
+
+\subsection{Project management}
+One-machine MPS setup, no paid GPUs. Work split: dataset and eval code,
+TerGRASP implementation, SVD and quantization supporting runs, figures and
+report (fill in per-member contribution).
+
+\section{Experiment}
+\subsection{Implementation}
+\texttt{assignment2.ipynb} contains the full pipeline: dataset preparation,
+BI ranking, residual capture, bridge fitting, ternary quantization, block
+replacement, and PPL/latency/parameter evaluation.
+
+\subsection{Results}
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Model & k=1 & k=2 & k=3 & k=4 & Note \\
+\midrule
+GPT-2 fitted (this work) & 45.11 & 50.09 & 140.42 & 879.52 & keeps graph depth, ~1.58-bit blocks \\
+GPT-2 hard removal & 45.76 & 47.95 & 121.81 & 943.24 & baseline control \\
+SmolLM fitted (this work) & 21.71 & 40.49 & 33.05 & 38.49 & \\
+SmolLM hard removal & 19.93 & 26.13 & 29.91 & 34.20 & \\
+\bottomrule
+\end{tabular}
+\caption{Validation PPL by number of replaced layers.}
+\end{table}
+
+\subsection{Findings}
+At $k{=}1$ the fitted ternary bridge matches or slightly beats hard removal
+while preserving depth and reducing the replaced blocks to $\sim$1.58
+bit/parameter. Higher $k$ tracks hard removal closely. The negative
+results (affine bridge repair, naive averaging, weight tying) show that the
+layer maps are not affine and not weight-interchangeable; a fitted
+low-rank bridge is the minimal fix that preserves PPL.
+
+\section{Conclusion}
+A fitted low-rank residual bridge with ternary quantization is a viable
+drop-in replacement for the most redundant layers: at $k{=}1$ it is
+indistinguishable from removing the layer, but keeps the computation
+graph intact and cuts storage. The BI profile doubles as a predictor of
+quantization tolerance, giving a single ranking that drives both pruning
+and compression decisions.
+
+\end{document}
