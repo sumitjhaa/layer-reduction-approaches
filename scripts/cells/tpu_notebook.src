@@ -3,7 +3,7 @@
 
 **Course:** CS613 Natural Language Processing, Assignment 2
 **Author:** Sumit Jha
-**Hardware target:** Google Colab **TPU v5e-1** (also runs on GPU, Apple MPS, and CPU)
+**Hardware target:** Google Colab **T4 GPU** (also runs on TPU, Apple MPS, and CPU)
 **Models:** 2 at `SMALL=True`; 5 at `SMALL=False`, spanning three architecture families
 **Data:** `Salesforce/wikitext`, config `wikitext-2-raw-v1`
 
@@ -67,15 +67,22 @@ $\lvert \Delta \rvert = 0.0$ exactly, on both models.
 
 ===CODE===
 # ==========================================================================
-# SECTION 1. ENVIRONMENT  (Colab TPU v5e-1 / GPU / MPS / CPU)
+# SECTION 1. ENVIRONMENT  (Colab T4 GPU / TPU / MPS / CPU)
 #
 # Colab instructions:
-#   Runtime -> Change runtime type -> Hardware accelerator -> TPU
-#   (v5e-1 is the default TPU offered on Colab Pro; v2/v3/v4 also work)
-#   Accelerator -> Runtime -> Change runtime type -> TPU -> v5e-1
+#   Runtime -> Change runtime type -> Hardware accelerator -> GPU
+#   -> GPU type -> T4 GPU
+#   (On Colab Pro, L4 or A100 also work; nothing below needs changing.)
 #
-# If you pick a TPU but torch_xla is missing, the install cell below installs it.
-# On a TPU runtime PyTorch/XLA is usually already present, so this is a no-op.
+# Why T4 and not bfloat16: T4 is Turing-class (sm_75). It has float16 tensor
+# cores but no bfloat16 ones, so on CUDA the whole notebook runs in float16 and
+# every number in the report is a float16 number. Healing overrides this and
+# forces float32, because AdamW on float16 parameters underflows the update at
+# lr 2e-5. See Section 9.
+#
+# Colab's free T4 is preemptible: sessions can be reclaimed mid-run and
+# everything in RAM is lost. That is why results are checkpointed to results/ as
+# each section finishes, not only at the very end.
 # ==========================================================================
 !pip install -q transformers datasets accelerate pandas matplotlib scipy
 
@@ -177,6 +184,23 @@ print(device_banner())
 print(f"MODEL_DTYPE  : {MODEL_DTYPE}")
 print(f"float64 on accelerator: {HAS_FP64} (linear algebra is forced to CPU)")
 
+
+# ---------------------------------------------------------------- checkpoint ---
+# Colab's free T4 can be preempted at any moment, and a preempted session loses
+# everything in RAM. Since the healing section alone is tens of minutes, results
+# are written as each section completes rather than only in the final cell.
+# A preempted run then leaves you with partial evidence instead of nothing.
+def checkpoint(name, df):
+    try:
+        os.makedirs("results", exist_ok=True)
+        df.to_csv(f"results/{name}.csv", index=False)
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        return True
+    except Exception as exc:            # a failed checkpoint must never kill the run
+        print(f"[checkpoint] could not write {name}: {exc}")
+        return False
+
 ===MD===
 ## 2. Scale and reproducibility
 
@@ -227,12 +251,29 @@ HEAL_LR = 2e-5
 HEAL_TEMP = 2.0
 HEAL_ALPHA = 0.5        # weight on hard CE; (1-alpha) on the T^2-scaled KL
 HEAL_SEQLEN = 256
-# A v5e-1 has 16 GB. AdamW keeps two extra copies of every parameter, so a
-# float32 train of an N-parameter model needs roughly 16N bytes. At 600M that is
-# ~9.6 GB, which fits; beyond that it does not. Rather than risk an out-of-memory
-# crash halfway through the grid, healing is skipped above this threshold and the
-# skip is reported, not hidden.
-HEAL_MAX_PARAMS = 600_000_000
+# Budget for the healing run, derived from memory that actually exists.
+#
+# A float32 AdamW train of an N-parameter student needs ~16N bytes (4 for the
+# parameter, 4 for the gradient, 8 for the two optimiser moments), and the frozen
+# teacher adds another 4N, so ~20N bytes all told. We also hold the tokenizer,
+# the calibration activations and a float32 CPU copy of the calibration matrix.
+#
+# On a Colab T4 the reported 15 GB is not fully available: the driver reserves
+# some, and the CUDA caching allocator holds freed blocks rather than returning
+# them, which is why a run that fits on paper can still OOM. We therefore budget
+# against a fraction of *measured free* memory and keep a fixed reserve.
+HEAL_RESERVE_GB = 3.0
+if device == "cuda":
+    _free_b, _total_b = torch.cuda.mem_get_info()
+    _budget_gb = max(1.0, (_free_b / 1e9) - HEAL_RESERVE_GB)
+    HEAL_MAX_PARAMS = int(_budget_gb * 1e9 / 20)
+    print(f"[memory] T4-style budget: {_free_b/1e9:.1f} GB free, "
+          f"reserving {HEAL_RESERVE_GB} GB, healing models up to "
+          f"{HEAL_MAX_PARAMS/1e6:.0f}M params")
+elif device == "xla":
+    HEAL_MAX_PARAMS = 600_000_000   # v5e-1: 16 GB HBM
+else:
+    HEAL_MAX_PARAMS = 600_000_000   # CPU/MPS: host RAM is not the constraint
 
 if SMALL:
     SEEDS = (0, 1, 2)
@@ -249,6 +290,7 @@ if SMALL:
     # Healing is the expensive part, so the small preset proves it works on the
     # cheapest configuration only. The paper grid covers both k values.
     HEAL_KS = (1,)
+    HEAL_SEEDS = (0, 1, 2)
 else:
     SEEDS = (0, 1, 2, 3, 4)
     TRAIN_CHARS, VAL_CHARS, TEST_CHARS = 2_000_000, 400_000, 400_000
@@ -262,6 +304,12 @@ else:
     RANK_DEFAULT = 32
     N_GUIDED = 6
     HEAL_KS = (1, 2)
+    # Healing keeps 3 seeds even in the paper grid. It costs ~400 optimiser steps
+    # per (model, k, seed) and would otherwise dominate the entire run: at 5
+    # models x 2 k x 5 seeds that is 50 float32 training runs, which a free
+    # Colab T4 will be preempted long before finishing. Three seeds is enough to
+    # put an error bar on the healed number, which is all it is used for.
+    HEAL_SEEDS = (0, 1, 2)
 
 BRIDGE_BITS = 2   # ternary grid
 
@@ -813,6 +861,7 @@ print(
     .agg(["mean", "std", "count"])
     .to_string()
 )
+checkpoint("main_comparison", results_df)
 
 ===CODE===
 def agg(df, split="val"):
@@ -981,6 +1030,7 @@ for mid in MODEL_IDS:
             )
 
 comp_df = pd.DataFrame(comp_rows)
+checkpoint("compression", comp_df)
 display(comp_df.round(3))
 
 fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.2))
@@ -1105,7 +1155,6 @@ for mid in MODEL_IDS:
     short = mid.split("/")[-1]
     n = len(BI[mid])
     order = sorted(range(n), key=lambda i: BI[mid][i])
-    targets_all = sorted(order[: max(max(KS), max(HEAL_KS))])
 
     probe = load_model_fp32(mid)
     total_params = n_params(probe)
@@ -1117,9 +1166,10 @@ for mid in MODEL_IDS:
              "reason": f"exceeds HEAL_MAX_PARAMS={HEAL_MAX_PARAMS}"}
         )
         print(f"{short}: SKIPPED for healing "
-              f"({total_params/1e6:.0f}M > {HEAL_MAX_PARAMS/1e6:.0f}M). "
-              f"AdamW needs ~16 bytes/param for fp32 training plus a second copy "
-              f"for the teacher; this would not fit in 16 GB of TPU HBM.")
+              f"({total_params/1e6:.0f}M params > {HEAL_MAX_PARAMS/1e6:.0f}M cap). "
+              f"A float32 AdamW train needs ~16 bytes/param for the student and "
+              f"4 more for the frozen teacher, so this would not fit in the "
+              f"memory we left free. Lower HEAL_RESERVE_GB to override.")
         continue
 
     teacher = load_model_fp32(mid)
@@ -1128,7 +1178,7 @@ for mid in MODEL_IDS:
 
     for k in HEAL_KS:
         targets = sorted(order[:k])
-        for seed in SEEDS:
+        for seed in HEAL_SEEDS:
             # 9000 + seed keeps the healing stream disjoint from the stream that
             # drives the bridge fits, so the two are not correlated by accident.
             gen = torch.Generator().manual_seed(9000 + seed)
@@ -1164,9 +1214,34 @@ for mid in MODEL_IDS:
                   f"(recovered {heal_rows[-1]['recovered_pct']:.1f}%)  "
                   f"[{dt:.0f}s]", flush=True)
             free(student)
+
+            # Project the cost of the rest of the healing grid from the first
+            # measured run. A free Colab T4 session gets preempted without
+            # warning, and finding out halfway through that the grid needs four
+            # hours is the wrong time to learn it.
+            planned = sum(
+                1
+                for m2 in MODEL_IDS
+                for k2 in HEAL_KS
+                for _ in HEAL_SEEDS
+                if not (
+                    heal_skipped
+                    and m2.split("/")[-1] in {s_["model"] for s_ in heal_skipped}
+                )
+            )
+            if planned > 1 and len(heal_rows) == 1:
+                est = dt * planned
+                print(f"      [timing] ~{est/60:.0f} min for all {planned} "
+                      f"healing runs at ~{dt:.0f}s each on {device}.",
+                      flush=True)
+                if device == "cuda" and est > 3600:
+                    print("      [warning] over an hour of healing on a "
+                          "preemptible Colab session. Consider SMALL=True, or "
+                          "reduce HEAL_STEPS, or use a paid runtime.", flush=True)
     free(teacher)
 
 heal_df = pd.DataFrame(heal_rows)
+checkpoint("healing", heal_df)
 if len(heal_df):
     display(
         heal_df.groupby(["model", "k"])
@@ -1292,6 +1367,7 @@ for mid in MODEL_IDS:
     free(m0)
 
 spectrum_df = pd.DataFrame(spectrum_rows)
+checkpoint("residual_spectrum", spectrum_df)
 display(
     spectrum_df[
         ["model_short", "layer", "bi_rank", "full_rank_ev"]
@@ -1530,6 +1606,7 @@ for mid in MODEL_IDS:
     print(f"{short}: ablations done")
 
 ablation_df = pd.DataFrame(ABL)
+checkpoint("ablations", ablation_df)
 display(ablation_df.round(4))
 
 ===CODE===
@@ -1651,6 +1728,7 @@ for mid in MODEL_IDS:
     free(m)
 
 test_df = pd.DataFrame(TEST)
+checkpoint("test_split", test_df)
 display(
     test_df.groupby(["operator", "model_short"])["test_ppl"]
     .agg(["mean", "std", "count"]).round(3)
@@ -1737,9 +1815,10 @@ what costs perplexity here.
 * Healing is run at one learning rate, one temperature, and one step count. The
   recovery fraction is therefore a lower bound on what tuned distillation would give,
   not a claim about the ceiling.
-* Healing is skipped on models above `HEAL_MAX_PARAMS` to stay inside TPU memory, so
-  the healing table covers fewer models than the rest of the notebook. The skips are
-  listed explicitly in Section 9 rather than omitted.
+* Healing is skipped on models above `HEAL_MAX_PARAMS`, a cap derived from measured
+  free device memory, so the healing table can cover fewer models than the rest of
+  the notebook on a 15 GB T4. The skips are listed explicitly in Section 9 and in
+  `results/healing_skipped.csv` rather than omitted.
 * Latency is a single-sequence microbenchmark at one length, not a serving benchmark.
 
 ===CODE===
@@ -1925,13 +2004,19 @@ if len(heal_df):
         len(regressed) == 0,
         f"{len(regressed)} of {len(heal_df)} runs did not improve",
     )
-    # Healing must not quietly put the deleted parameters back.
+    # Healing must not quietly put the deleted parameters back. Parameter count
+    # depends only on the target set, so one rebuild per distinct (model, target)
+    # covers every seed -- otherwise this re-loads a model 40 times at SMALL=False.
     hp = []
+    cache = {}
     for r in heal_df.itertuples():
-        m = hard_remove_fp32(r.model_id, ast.literal_eval(r.target))
-        if n_params(m) != r.params:
-            hp.append(f"{r.model_short} k={r.k}: {n_params(m)} != {r.params}")
-        free(m)
+        key = (r.model_id, r.target)
+        if key not in cache:
+            m = hard_remove_fp32(r.model_id, ast.literal_eval(r.target))
+            cache[key] = n_params(m)
+            free(m)
+        if cache[key] != r.params:
+            hp.append(f"{r.model_short} k={r.k}: {cache[key]} != {r.params}")
     check(
         "healed model keeps the post-deletion parameter count",
         len(hp) == 0,
