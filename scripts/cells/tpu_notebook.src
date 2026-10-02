@@ -66,6 +66,7 @@ $\lvert \Delta \rvert = 0.0$ exactly, on both models.
 # ==========================================================================
 !pip install -q transformers datasets accelerate pandas matplotlib scipy
 
+import ast
 import gc
 import json
 import math
@@ -1397,10 +1398,139 @@ print("\nrank-RANK_DEFAULT ceiling per block (the predictive diagnostic)")
 display(diag.round(4))
 
 ===MD===
-## 14. Export
+## 14. Self-verification gate
 
-Everything is written next to the notebook so the report can quote files rather than
-screenshots.
+Before exporting, this cell checks the run is internally consistent and prints a
+single verdict. Read this output first: if any check fails, the numbers are not
+usable and the cause is named.
+
+Checks performed:
+
+1. every cell parses and ran (implicit — you would not have reached this section)
+2. the fit is bit-reproducible (Section 7)
+3. every reported point has the full number of seeds
+4. compression is monotonically non-increasing in $k$ for removal
+5. the fitted bridge never claims more parameters than the block it replaced
+6. the random control is disjoint from the BI targets
+7. no NaN or infinite perplexity anywhere
+8. the rank ceiling is a genuine upper bound on the achieved fit
+
+===CODE===
+checks = []
+
+
+def check(name, ok, detail=""):
+    checks.append({"check": name, "passed": bool(ok), "detail": detail})
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f"  -- {detail}" if detail else ""))
+
+
+# 2) determinism
+check(
+    "fit is bit-reproducible",
+    bool(det_df["deterministic"].all()),
+    f"max |delta| = {det_df['abs_delta'].max():.2e}",
+)
+
+# 3) seed coverage
+main_ops = ["baseline", "BI removal", "random removal", "fitted bridge"]
+cov = results_df[results_df.operator.isin(main_ops)].groupby(
+    ["operator", "model_short", "k"]
+)["seed"].nunique()
+expected = 1 if "baseline" in set(cov.index.get_level_values(0)) else len(SEEDS)
+short_rows = cov[cov != expected]
+check(
+    "every point has the full seed count",
+    len(short_rows) == 0,
+    f"expected {expected}; offenders={len(short_rows)}",
+)
+
+# 4) compression monotone in k
+mono_ok, mono_detail = True, []
+for (short, op), s in comp_df.groupby(["model", "operator"]):
+    s = s.sort_values("k")
+    p = s["params_M"].to_numpy()
+    if np.any(np.diff(p) > 1e-9):
+        mono_ok = False
+        mono_detail.append(f"{short}/{op}")
+check(
+    "parameter count is monotone in k",
+    mono_ok,
+    ", ".join(mono_detail) if mono_detail else "all operators",
+)
+
+# 5) bridge never inflates the model
+bridge = results_df[results_df.operator == "fitted bridge"]
+removal = results_df[results_df.operator == "BI removal"]
+merged = bridge.merge(removal, on=["model_short", "k"], suffixes=("_br", "_rm"))
+check(
+    "bridge never exceeds plain removal in parameters",
+    bool((merged["params_br"] <= merged["params_rm"] + 1).all()),
+    f"max excess = {int((merged['params_br'] - merged['params_rm']).max())} params",
+)
+
+# 6) random control disjoint from BI targets
+ctrl = results_df[results_df.operator == "random removal"]
+overlaps = 0
+for _, row in ctrl.iterrows():
+    pick = row["target"]
+    pick = ast.literal_eval(pick) if isinstance(pick, str) else list(pick)
+    order = sorted(range(len(BI[row["model"]])), key=lambda i: BI[row["model"]][i])
+    if set(pick) & set(order[: int(row["k"])]):
+        overlaps += 1
+check("random control disjoint from BI targets", overlaps == 0, f"{overlaps} overlaps")
+
+# 7) no NaN / inf perplexity
+vals = results_df["ppl"].to_numpy(dtype=float)
+check(
+    "all perplexities finite and positive",
+    bool(np.all(np.isfinite(vals)) and np.all(vals > 0)),
+    f"min={np.nanmin(vals):.3f} max={np.nanmax(vals):.4g}",
+)
+
+# 8) the rank ceiling really is an upper bound on the achieved local fit
+ev_col = f"ev_{RANK_DEFAULT}"
+ceiling_of = {}
+for _, row in spectrum_df.iterrows():
+    if not math.isnan(row.get(ev_col, np.nan)):
+        # the ablation target is always the lowest-BI block of that model
+        order = sorted(range(len(BI[row["model"]])), key=lambda i: BI[row["model"]][i])
+        if row["layer"] == order[0]:
+            ceiling_of[row["model_short"]] = float(row[ev_col])
+
+bad_bound = []
+for _, row in ablation_df[ablation_df.knob == "rank"].iterrows():
+    ceil = ceiling_of.get(row["model_short"])
+    if ceil is not None and row["fit_ev"] > ceil + 1e-6:
+        bad_bound.append(
+            f"{row['model_short']} rank={row['value']}: "
+            f"fit {row['fit_ev']:.3f} > ceiling {ceil:.3f}"
+        )
+check(
+    "achieved fit never exceeds the rank ceiling",
+    len(bad_bound) == 0,
+    "; ".join(bad_bound[:3]) if bad_bound else "consistent with Eckart-Young",
+)
+
+verdict_df = pd.DataFrame(checks)
+display(verdict_df)
+n_pass = int(verdict_df["passed"].sum())
+print(f"\n{n_pass}/{len(verdict_df)} checks passed.")
+
+if n_pass == len(verdict_df):
+    print("VERDICT: run is internally consistent. The numbers in Section 13 stand.")
+else:
+    print(
+        "VERDICT: at least one check failed. Do not quote these numbers until the "
+        "failing check above is understood."
+    )
+
+===MD===
+## 15. Export and download
+
+Everything is written to a `results/` folder next to the notebook. On Colab that
+folder lives in the runtime and is **deleted when the session ends**, so the last
+cell bundles it into a single zip and triggers a browser download. Save that zip;
+it is the evidence.
 
 ===CODE===
 import os
@@ -1443,5 +1573,50 @@ with open("results/meta.json", "w") as fh:
 print("wrote:")
 for f in sorted(os.listdir("results")):
     print("   results/" + f)
+
+# ---- bundle everything into one downloadable archive ---------------------
+import shutil
+
+stamp = meta["device"].replace("/", "_")
+archive = shutil.make_archive(
+    f"evidence_{stamp}_SMALL{int(SMALL)}", "zip", root_dir="results"
+)
+size_mb = os.path.getsize(archive) / 1e6
+print(f"\nbundled -> {archive}  ({size_mb:.2f} MB)")
+
+# Works on Colab (saves to /content and pops a download dialog) and is a no-op
+# elsewhere. Try both trigger styles so it fires regardless of Colab version.
+try:
+    from google.colab import files
+
+    files.download(archive)
+    print("download started via google.colab.files")
+except Exception:
+    try:
+        from IPython.display import display, HTML
+
+        display(
+            HTML(
+                f'<a download="{archive}" href="sandbox:/content/{archive}">'
+                f"Download {archive}</a>"
+            )
+        )
+    except Exception:
+        print(f"could not trigger a download; fetch {archive} manually")
+
+print(
+    "\nEvidence checklist -- keep these with the report:\n"
+    "  results/meta.json               device, versions, seeds, determinism flag\n"
+    "  results/determinism.csv         bit-reproducibility proof\n"
+    "  results/main_comparison.csv     every PPL/params/latency run, per seed\n"
+    "  results/compression.csv         measured parameter and latency deltas\n"
+    "  results/paired_comparison.csv   bridge-minus-removal, seed by seed\n"
+    "  results/residual_spectrum.csv   training-free rank ceilings per block\n"
+    "  results/ablations.csv           rank / bit-width / calibration sweeps\n"
+    "  results/rank_correlation.csv    the local-fit vs perplexity anti-correlation\n"
+    "  results/ev_guided.csv           EV-guided vs BI-guided selection\n"
+    "  results/test_split.csv          held-out test perplexity\n"
+    "  evidence_*.zip                  all of the above, plus the run's config\n"
+)
 print()
 print(json.dumps(meta, indent=2))
