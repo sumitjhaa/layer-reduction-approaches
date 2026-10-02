@@ -61,7 +61,7 @@ $\lvert \Delta \rvert = 0.0$ exactly, on both models.
 5. **Compression is measured**, not asserted: parameters, fp16 bytes, latency.
 6. **The mechanism is measured training-free** (Section 10), which turns a failed
    method into a predictive rule.
-7. **The run audits itself.** Section 15 checks twelve invariants and refuses to
+7. **The run audits itself.** Section 15 checks thirteen invariants and refuses to
    certify the numbers if any fail.
 8. **Everything is computed in-notebook.** No hard-coded result tables.
 
@@ -875,6 +875,48 @@ print(
 )
 
 ===CODE===
+# --- BI vs random: the comparison F1 rests on -----------------------------
+# Reported as mean, worst case over seeds, and the ratio, because the mean
+# alone hides the real story. Random removal has a heavy right tail: it can be
+# merely unlucky or catastrophically unlucky depending on which block it draws,
+# and averaging over seeds papers over which of the two happened to occur.
+# For a compression method you would actually ship, the worst case is the number
+# that matters -- a config that sometimes explodes is not deployable even if its
+# average looks fine.
+rel_rows = []
+for (short, k), g in results_df[
+    results_df.operator.isin(["BI removal", "random removal"])
+].groupby(["model_short", "k"]):
+    piv = g.pivot_table(index="seed", columns="operator", values="ppl").dropna()
+    if "BI removal" not in piv or "random removal" not in piv:
+        continue
+    bi, rnd = piv["BI removal"], piv["random removal"]
+    rel_rows.append(
+        {
+            "model": short,
+            "k": k,
+            "bi_mean": bi.mean(),
+            "bi_worst": bi.max(),
+            "bi_std": bi.std(),
+            "random_mean": rnd.mean(),
+            "random_worst": rnd.max(),
+            "random_std": rnd.std(),
+            "ratio_mean": rnd.mean() / bi.mean(),
+            "ratio_worst": rnd.max() / bi.max(),
+        }
+    )
+
+reliability_df = pd.DataFrame(rel_rows).sort_values(["model", "k"])
+display(reliability_df.round(3))
+print(
+    "ratio_mean = random_mean / bi_mean.  ratio_worst = random_worst / bi_worst.\n"
+    "Both are >= 1 when BI removal wins.  Where ratio_mean is near 1 but\n"
+    "ratio_std is large, random removal did not help on average -- it merely\n"
+    "got lucky on this particular draw, which is exactly the unreliability that\n"
+    "worst-case reporting is for."
+)
+
+===CODE===
 fig, axes = plt.subplots(1, len(MODEL_IDS), figsize=(6.8 * len(MODEL_IDS), 4.3))
 axes = np.atleast_1d(axes)
 styles = {
@@ -1002,8 +1044,9 @@ def hard_remove_fp32(model_id, indices):
     for i, layer in enumerate(get_layers(m)):
         if hasattr(layer, "layer_idx"):
             layer.layer_idx = i
-        if hasattr(layer, "self_attn") and hasattr(layer, "self_attn", "layer_idx"):
-            layer.self_attn.layer_idx = i
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None and hasattr(attn, "layer_idx"):
+            attn.layer_idx = i
     return m
 
 
@@ -1627,11 +1670,24 @@ at no parameter cost beyond the deletion itself. See Section 9 for the table and
 Section 13 for the held-out number. Everything below is about *why* the more
 elaborate operators do worse than this simple pair.
 
-**F1. Block-influence ranking is the result that holds up.**
-BI-targeted removal beats random removal by orders of magnitude at every $k$ on both
-models (for example GPT-2 $k=1$: $45.76$ vs $1453.93$). This survives every seed,
-and the random control is drawn from outside the BI set so the comparison is fair.
-Whatever else is true, this is solid.
+**F1. Block-influence ranking is the result that holds up, and it holds up as a
+reliability claim rather than a magnitude claim.**
+
+BI-targeted removal is worse than or equal to random removal at every single
+$($model, $k)$ point, so the ranking never costs anything. But the converse is not
+true in the magnitude sense, and we will not claim it: at SmolLM $k=1$ the two are
+within noise of each other (see the reliability table in Section 8, ratio $\approx$
+1). "BI beats random by orders of magnitude at every $k$" is simply false and we
+measured it.
+
+Where the ranking earns its keep is in the tail. Random removal has a heavy right
+side: depending on which blocks it draws, a random config is either slightly unlucky
+or catastrophically unlucky, and the mean over seeds hides which case occurred. GPT-2
+$k=1$ is the clearest example, with a random worst case two orders of magnitude above
+the BI worst case. So the honest statement is: BI removal is *never worse and often
+vastly better*, with the advantage concentrated in the worst case. That is the
+property you need for a deployable compression method, and it is why the ranking is
+worth more than a single mean would suggest.
 
 **F2. The fitted ternary bridge does not beat deletion, and adds no compression.**
 The bridge and plain removal produce *identical* parameter counts, because a
@@ -1743,6 +1799,7 @@ Checks performed:
 10. healing improved every pruned model it touched
 11. the healed model still has the post-deletion parameter count
 12. held-out test perplexity is consistent with validation for the healed model
+13. BI removal never loses to random removal, which is the load-bearing half of F1
 
 ===CODE===
 checks = []
@@ -1840,6 +1897,20 @@ check(
     "; ".join(bad_bound[:3]) if bad_bound else "consistent with Eckart-Young",
 )
 
+# F1's load-bearing claim, checked rather than asserted: the BI ranking must
+# never actually hurt. Magnitude is allowed to tie (it does, at SmolLM k=1);
+# losing is not.
+bi_worse = reliability_df[reliability_df["bi_mean"] > reliability_df["random_mean"]]
+check(
+    "BI removal is never worse than random removal (F1)",
+    len(bi_worse) == 0,
+    f"{len(bi_worse)} of {len(reliability_df)} (model, k) points lost to random"
+    + ("; " + "; ".join(
+        f"{r.model} k={r.k}: {r.bi_mean:.2f} vs {r.random_mean:.2f}"
+        for r in bi_worse.itertuples()
+    ) if len(bi_worse) else ""),
+)
+
 # ---- healing-specific checks ------------------------------------------------
 if len(heal_df):
     check(
@@ -1909,6 +1980,7 @@ os.makedirs("results", exist_ok=True)
 results_df.to_csv("results/main_comparison.csv", index=False)
 comp_df.to_csv("results/compression.csv", index=False)
 paired_df.to_csv("results/paired_comparison.csv", index=False)
+reliability_df.to_csv("results/bi_vs_random.csv", index=False)
 spectrum_df.to_csv("results/residual_spectrum.csv", index=False)
 ablation_df.to_csv("results/ablations.csv", index=False)
 corr_df.to_csv("results/rank_correlation.csv", index=False)
