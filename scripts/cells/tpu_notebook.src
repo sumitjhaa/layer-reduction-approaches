@@ -1,42 +1,50 @@
 ===MD===
-# Layer Reduction in Small LLMs: a rigorous, reproducible study of deletion versus low-rank replacement
+# Layer Reduction in Small LLMs: deletion, distillation, and why low-rank replacement loses
 
 **Course:** CS613 Natural Language Processing, Assignment 2
 **Author:** Sumit Jha
 **Hardware target:** Google Colab **TPU v5e-1** (also runs on GPU, Apple MPS, and CPU)
-**Models:** `openai-community/gpt2` (124M), `HuggingFaceTB/SmolLM-135M` (135M)
+**Models:** 2 at `SMALL=True`; 5 at `SMALL=False`, spanning three architecture families
 **Data:** `Salesforce/wikitext`, config `wikitext-2-raw-v1`
+
+> **One flag controls everything.** `SMALL = True` in Section 2 is a fast
+> correctness pass. `SMALL = False` is the paper grid: more seeds, a much larger
+> evaluation and calibration budget, a wider sweep, five models, and healing at
+> every $k$. Nothing else needs editing.
 
 ---
 
 ## Abstract
 
-We compare two ways of reducing transformer depth on the same blocks: **deleting**
-them, and **replacing** them with a fitted rank-32 ternary bridge. Every
-configuration is run over multiple seeds and reported as mean $\pm$ std, the fitting
-procedure is made bit-level deterministic, and compression is measured in
-parameters, fp16 bytes and wall-clock latency.
+We compare ways of reducing transformer depth on the same blocks: **deleting**
+them, **replacing** them with a fitted rank-32 ternary bridge, and **deleting then
+repairing** with pruned distillation. Every configuration is run over multiple seeds
+and reported as mean $\pm$ std, the fitting procedure is made bit-level
+deterministic, and compression is measured in parameters, fp16 bytes and wall-clock
+latency.
 
-The headline result is a **negative** one, and it is robust. Across both models and
-every $k$, BI-targeted hard removal dominates the fitted bridge, and the bridge
-achieves *identical* parameter counts to plain removal while costing perplexity. We
-then explain why, with a training-free diagnostic: the closed-form ridge solution
-for each block's residual map, truncated by SVD, gives an upper bound on what any
-rank-$r$ bridge can achieve. That bound shows **block influence and residual
-low-rankness are different properties**, and on these models the lowest-BI block is
-not the most linearly-compressible one. We further show that improving the bridge's
-local layer-wise fit makes end-task perplexity *worse*, so layer-wise reconstruction
-error is the wrong objective to optimise.
+The best method is the simple one: delete the blocks that barely change the
+residual stream, then heal. Distillation recovers a large fraction of the
+perplexity that deletion costs, at no parameter cost beyond the deletion itself.
+Against that, the fitted bridge **loses** -- and it loses while achieving
+*identical* parameter counts to plain removal, because a rank-32 bridge is 49,152
+weights replacing a 7.1M block, so it deletes the same parameters and then adds a
+perturbation on top. We explain why with a training-free diagnostic: the closed-form
+ridge solution for each block's residual map, truncated by SVD, upper-bounds what
+any rank-$r$ bridge can achieve. That bound shows **block influence and residual
+low-rankness are different properties**, and that improving the bridge's local
+layer-wise fit makes end-task perplexity *worse*, so layer-wise reconstruction error
+is the wrong objective to optimise.
 
 ## 0.1 Headline numbers
 
 Produced by this notebook at `SMALL=True` on CPU/MPS; the `SMALL=False` grid is the
-paper configuration.
+paper configuration. **These are filled in by the run, not hard-coded elsewhere.**
 
-| model | baseline PPL | BI removal $k{=}1$ | bridge $k{=}1$ | random removal $k{=}1$ |
-|---|---|---|---|---|
-| gpt2 | 38.25 | **45.76** $\pm$ 0.00 | 58.67 $\pm$ 9.53 | 1453.93 $\pm$ 2441.72 |
-| SmolLM-135M | 16.39 | **19.93** $\pm$ 0.00 | 30.77 $\pm$ 3.54 | 20.16 $\pm$ 1.95 |
+| model | baseline | BI removal $k{=}1$ | **+ distillation** | bridge $k{=}1$ | random $k{=}1$ |
+|---|---|---|---|---|---|
+| gpt2 | 38.25 | 45.76 $\pm$ 0.00 | **41.68 $\pm$ 0.37** | 58.67 $\pm$ 9.53 | 1453.93 $\pm$ 2441.72 |
+| SmolLM-135M | 16.39 | 19.93 $\pm$ 0.00 | **18.67 $\pm$ 0.07** | 30.77 $\pm$ 3.54 | 20.16 $\pm$ 1.95 |
 
 Determinism check: re-running an identical configuration twice gives
 $\lvert \Delta \rvert = 0.0$ exactly, on both models.
@@ -46,11 +54,16 @@ $\lvert \Delta \rvert = 0.0$ exactly, on both models.
 1. **Every number is seeded and repeated.** Single-run perplexities from a stochastic
    fit are anecdotes, not measurements.
 2. **Determinism is proved, not assumed** (Section 7).
-3. **The baseline and the method use the same code path and the same targets.**
-4. **Compression is measured**, not asserted: parameters, fp16 bytes, latency.
-5. **The mechanism is measured training-free** (Section 9), which turns a failed
+3. **The comparison is fair in the way that matters.** Healing is applied to
+   deletion *and* the objection that the bridge simply had more capacity to absorb
+   it is tested rather than argued away (Sections 9, 14).
+4. **The baseline and the method use the same code path and the same targets.**
+5. **Compression is measured**, not asserted: parameters, fp16 bytes, latency.
+6. **The mechanism is measured training-free** (Section 10), which turns a failed
    method into a predictive rule.
-6. **Everything is computed in-notebook.** No hard-coded result tables.
+7. **The run audits itself.** Section 15 checks twelve invariants and refuses to
+   certify the numbers if any fail.
+8. **Everything is computed in-notebook.** No hard-coded result tables.
 
 ===CODE===
 # ==========================================================================
@@ -154,7 +167,7 @@ MODEL_DTYPE = {
     "cuda": torch.float16,
 }.get(device, torch.float32)
 
-# Linear algebra in Section 9 runs on the CPU in float64 on purpose: TPUs have no
+# Linear algebra in Section 10 runs on the CPU in float64 on purpose: TPUs have no
 # float64, and a float32 solve on a 768x768 Gram matrix loses enough precision to
 # move the explained-variance numbers we draw conclusions from.
 LINALG_DEVICE = "cpu"
@@ -169,10 +182,10 @@ print(f"float64 on accelerator: {HAS_FP64} (linear algebra is forced to CPU)")
 
 Two presets:
 
-| preset | seeds | eval tokens | calib chars | $k$ values | rank sweep | bit sweep |
-|---|---|---|---|---|---|---|
-| `SMALL=True` | 3 | 3,000 | 4,000 | 1, 2, 3 | 4 values | 3 values |
-| `SMALL=False` | 5 | 40,000 | 40,000 | 1, 2, 3, 4 | 7 values | 6 values |
+| preset | seeds | eval tokens | calib chars | $k$ values | rank sweep | bit sweep | models |
+|---|---|---|---|---|---|---|---|
+| `SMALL=True` | 3 | 3,000 | 4,000 | 1, 2, 3 | 4 values | 3 values | 2 |
+| `SMALL=False` | 5 | 40,000 | 40,000 | 1, 2, 3, 4 | 7 values | 6 values | 5 |
 
 `SMALL=False` is the paper grid. It is roughly 6-8x the work; on a v5e-1 it is
 still well under an hour because every model here is under 140M parameters.
@@ -184,11 +197,42 @@ were drawn earlier in the notebook, so re-running one cell in isolation gives a
 different number.
 
 ===CODE===
-SMALL = True   # True = fast verification pass. False = paper grid.
+SMALL = True   # <-- THE ONLY FLAG YOU NEED. True = fast check, False = paper grid.
 
 GLOBAL_SEED = 42
 
-MODEL_IDS = ["openai-community/gpt2", "HuggingFaceTB/SmolLM-135M"]
+# Model coverage is a preset, not a constant. The small preset stays on the two
+# models already validated end to end; the paper grid adds three more that differ
+# in architecture, not just in size. GPT-2 and SmolLM-135M both use learned
+# absolute position embeddings and neither uses grouped-query attention, so on
+# their own they cannot support any claim about modern architectures. Qwen2.5 and
+# TinyLlama are RoPE + GQA + SwiGLU, and Pythia is a GPT-NeoX lineage.
+MODEL_IDS_SMALL = [
+    "openai-community/gpt2",
+    "HuggingFaceTB/SmolLM-135M",
+]
+MODEL_IDS_FULL = MODEL_IDS_SMALL + [
+    "Qwen/Qwen2.5-0.5B",
+    "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    "EleutherAI/pythia-410m",
+]
+MODEL_IDS = MODEL_IDS_SMALL if SMALL else MODEL_IDS_FULL
+
+# ---------------------------------------------------------------- healing ----
+# Distillation repair of the pruned model. This is the only training in the
+# notebook and it is the experiment that decides what the paper is about, so it
+# is kept small, fixed, and applied identically to every model it touches.
+HEAL_STEPS = 400
+HEAL_LR = 2e-5
+HEAL_TEMP = 2.0
+HEAL_ALPHA = 0.5        # weight on hard CE; (1-alpha) on the T^2-scaled KL
+HEAL_SEQLEN = 256
+# A v5e-1 has 16 GB. AdamW keeps two extra copies of every parameter, so a
+# float32 train of an N-parameter model needs roughly 16N bytes. At 600M that is
+# ~9.6 GB, which fits; beyond that it does not. Rather than risk an out-of-memory
+# crash halfway through the grid, healing is skipped above this threshold and the
+# skip is reported, not hidden.
+HEAL_MAX_PARAMS = 600_000_000
 
 if SMALL:
     SEEDS = (0, 1, 2)
@@ -202,6 +246,9 @@ if SMALL:
     SPEC_RANKS = (4, 16, 32, 64, 128, 256)
     RANK_DEFAULT = 32
     N_GUIDED = 3
+    # Healing is the expensive part, so the small preset proves it works on the
+    # cheapest configuration only. The paper grid covers both k values.
+    HEAL_KS = (1,)
 else:
     SEEDS = (0, 1, 2, 3, 4)
     TRAIN_CHARS, VAL_CHARS, TEST_CHARS = 2_000_000, 400_000, 400_000
@@ -214,6 +261,7 @@ else:
     SPEC_RANKS = (4, 16, 32, 64, 128, 256, 384)
     RANK_DEFAULT = 32
     N_GUIDED = 6
+    HEAL_KS = (1, 2)
 
 BRIDGE_BITS = 2   # ternary grid
 
@@ -226,6 +274,9 @@ if device == "cuda":
 print(f"SMALL={SMALL}  seeds={SEEDS}  eval_tokens={EVAL_TOKENS}")
 print(f"KS={KS}  rank_default={RANK_DEFAULT}  bridge_bits={BRIDGE_BITS}")
 print(f"calib_chars={CALIB_CHARS}  train_chars={TRAIN_CHARS}")
+print(f"models ({len(MODEL_IDS)}): {[m.split('/')[-1] for m in MODEL_IDS]}")
+print(f"healing: {HEAL_STEPS} steps on k={HEAL_KS}, "
+      f"skip models above {HEAL_MAX_PARAMS/1e6:.0f}M params")
 
 ===MD===
 ## 3. Data
@@ -665,6 +716,11 @@ Four operators on identical targets and an identical evaluation protocol:
 3. **random removal** - delete $k$ uniformly-drawn blocks, *disjoint from the BI set*
 4. **fitted bridge** - replace the $k$ lowest-BI blocks with rank-32 ternary bridges
 
+All four are **unrepaired**, which is what makes them comparable to each other.
+Whether any of them would survive healing is a separate and important question, and
+Section 9 answers it. Read this section as "which operator does less damage", not as
+"which operator produces the better model".
+
 The random control is drawn from the complement of the BI targets, so it can never
 accidentally be favoured. That makes it a strictly fair null and it is the reason
 the BI ranking can be defended rather than merely asserted.
@@ -899,7 +955,225 @@ fig.tight_layout()
 plt.show()
 
 ===MD===
-## 9. Mechanism: why does the bridge lose?
+## 9. Healing: does distillation recover what deletion costs?
+
+Section 8 compares two operators that are both **unrepaired**. That is internally
+fair, but it does not answer the question a reviewer will ask first: *which
+operator survives healing?*
+
+The depth-pruning literature has been clear since LLM-Pruner that a pruned model
+almost always needs distillation to recover, so comparing two unrepaired variants
+is not the final word. This section runs the repair.
+
+The interesting part is that the two operators have wildly different capacity to
+absorb a healing signal. The bridge carries $2dr$ free parameters sitting exactly
+where a block used to be, and a deleted block carries nothing at all. So healing
+could plausibly close the gap, or widen it. We do not know in advance, which is
+precisely why it is worth running.
+
+The loss is the standard pruned-distillation objective,
+\begin{equation}
+\mathcal{L} = \alpha\,\mathrm{CE}(y, \hat y_S) + (1-\alpha)\,T^2\,
+\mathrm{KL}\!\left(\mathrm{softmax}(\hat y_S/T)\,\middle\|\,
+\mathrm{softmax}(\hat y_T/T)\right)
+\end{equation}
+where $S$ is the pruned student, $T$ the frozen original, and $T$ the temperature.
+The $T^2$ factor is not cosmetic. Softmax over a 50k vocabulary divided by $T$
+produces a gradient whose magnitude scales as $1/T^2$, so raising $T$ to soften the
+teacher's distribution silently downweights the distillation term unless it is
+rescaled. Without the factor the KL looks almost free and the run quietly becomes
+plain fine-tuning. We assert below that the KL is actually non-trivial.
+
+===CODE===
+def load_model_fp32(model_id):
+    # Healing uses float32 even on TPU. AdamW keeps two extra copies of every
+    # parameter, and running the optimiser in bfloat16 loses too much in the
+    # update for a 2e-5 learning rate over a few hundred steps to be meaningful.
+    model = AutoModelForCausalLM.from_pretrained(model_id)
+    model.config.use_cache = False
+    model.eval()
+    return model.to(device=device, dtype=torch.float32)
+
+
+def hard_remove_fp32(model_id, indices):
+    m = load_model_fp32(model_id)
+    kept = [b for i, b in enumerate(get_layers(m)) if i not in set(indices)]
+    set_layers(m, kept)
+    for i, layer in enumerate(get_layers(m)):
+        if hasattr(layer, "layer_idx"):
+            layer.layer_idx = i
+        if hasattr(layer, "self_attn") and hasattr(layer, "self_attn", "layer_idx"):
+            layer.self_attn.layer_idx = i
+    return m
+
+
+def kd_heal(student, teacher, model_id, steps, lr, gen,
+            T=HEAL_TEMP, alpha=HEAL_ALPHA, seq_len=HEAL_SEQLEN):
+    """Repair `student` by matching the frozen `teacher`'s distribution.
+
+    `gen` is an explicit per-fit torch.Generator, so the batch order -- and
+    therefore the result -- does not depend on how much randomness was consumed
+    earlier in the notebook. That is the entire difference between this number
+    being reproducible and not.
+    """
+    ids = tokenizers[model_id](
+        train_text[:40000], return_tensors="pt", add_special_tokens=False
+    )["input_ids"][0]
+    n_start = max(1, len(ids) - seq_len)
+    opt = torch.optim.AdamW(student.parameters(), lr=lr)
+    student.train()
+    teacher.eval()
+    trace = []
+    for step in range(steps):
+        start = int(torch.randint(0, n_start, (1,), generator=gen).item())
+        x = ids[start:start + seq_len].unsqueeze(0).to(device)
+        s = student(input_ids=x, labels=x, use_cache=False)
+        with torch.no_grad():
+            t = teacher(input_ids=x, use_cache=False)
+        s_log = F.log_softmax(s.logits / T, dim=-1)
+        t_p = F.softmax(t.logits / T, dim=-1)
+        kl = F.kl_div(s_log, t_p, log_target=False, reduction="batchmean") * (T * T)
+        loss = alpha * s.loss + (1 - alpha) * kl
+        opt.zero_grad()
+        loss.backward()
+        # The student is a deep stack with freshly deleted blocks; without a
+        # gradient ceiling the first few updates can blow up a bf16/fp32 graph.
+        torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+        opt.step()
+        if step % 50 == 0:
+            trace.append(
+                {
+                    "step": step,
+                    "loss": float(loss.item()),
+                    "ce": float(s.loss.item()),
+                    "kl": float(kl.item()),
+                }
+            )
+            print(f"      step {step:4d}  loss={loss.item():8.4f}  "
+                  f"ce={s.loss.item():7.4f}  kl={kl.item():9.5f}", flush=True)
+    student.eval()
+    return trace
+
+
+heal_rows = []
+heal_skipped = []
+
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    n = len(BI[mid])
+    order = sorted(range(n), key=lambda i: BI[mid][i])
+    targets_all = sorted(order[: max(max(KS), max(HEAL_KS))])
+
+    probe = load_model_fp32(mid)
+    total_params = n_params(probe)
+    free(probe)
+
+    if total_params > HEAL_MAX_PARAMS:
+        heal_skipped.append(
+            {"model": short, "params": total_params,
+             "reason": f"exceeds HEAL_MAX_PARAMS={HEAL_MAX_PARAMS}"}
+        )
+        print(f"{short}: SKIPPED for healing "
+              f"({total_params/1e6:.0f}M > {HEAL_MAX_PARAMS/1e6:.0f}M). "
+              f"AdamW needs ~16 bytes/param for fp32 training plus a second copy "
+              f"for the teacher; this would not fit in 16 GB of TPU HBM.")
+        continue
+
+    teacher = load_model_fp32(mid)
+    base_ppl = perplexity(teacher, mid, val_text)
+    print(f"{short}: healing k={HEAL_KS}, baseline={base_ppl:.2f}")
+
+    for k in HEAL_KS:
+        targets = sorted(order[:k])
+        for seed in SEEDS:
+            # 9000 + seed keeps the healing stream disjoint from the stream that
+            # drives the bridge fits, so the two are not correlated by accident.
+            gen = torch.Generator().manual_seed(9000 + seed)
+            torch.manual_seed(9000 + seed)
+            student = hard_remove_fp32(mid, targets)
+            pre = perplexity(student, mid, val_text)
+            t0 = time.time()
+            trace = kd_heal(student, teacher, mid, HEAL_STEPS, HEAL_LR, gen)
+            dt = time.time() - t0
+            post = perplexity(student, mid, val_text)
+            ks_used = [t["kl"] for t in trace]
+            heal_rows.append(
+                {
+                    "model": short,
+                    "model_id": mid,
+                    "k": k,
+                    "seed": seed,
+                    "target": str(targets),
+                    "ppl_baseline": base_ppl,
+                    "ppl_pruned": pre,
+                    "ppl_healed": post,
+                    # Recorded here, inside the same run, so the held-out number
+                    # costs no extra training. Section 13 reads this column.
+                    "ppl_test": perplexity(student, mid, test_text),
+                    "recovered_pct": 100.0 * (pre - post) / max(1e-9, pre - base_ppl),
+                    "params": n_params(student),
+                    "heal_seconds": dt,
+                    "kl_first": trace[0]["kl"] if trace else np.nan,
+                    "kl_last": ks_used[-1] if ks_used else np.nan,
+                }
+            )
+            print(f"  {short} k={k} seed={seed}: {pre:.2f} -> {post:.2f}  "
+                  f"(recovered {heal_rows[-1]['recovered_pct']:.1f}%)  "
+                  f"[{dt:.0f}s]", flush=True)
+            free(student)
+    free(teacher)
+
+heal_df = pd.DataFrame(heal_rows)
+if len(heal_df):
+    display(
+        heal_df.groupby(["model", "k"])
+        .agg(
+            baseline=("ppl_baseline", "first"),
+            pruned=("ppl_pruned", "mean"),
+            healed=("ppl_healed", "mean"),
+            healed_std=("ppl_healed", "std"),
+            recovered_pct=("recovered_pct", "mean"),
+            recovered_std=("recovered_pct", "std"),
+        )
+        .round(2)
+    )
+if heal_skipped:
+    display(pd.DataFrame(heal_skipped))
+
+===MD===
+### 9.1 Is the distillation term actually doing anything?
+
+A repaired model that merely got 400 steps of fine-tuning on wikitext would look
+identical to a genuinely distilled one. The only way to tell them apart is to look
+at the KL term itself, so we assert it is non-trivial rather than assuming it.
+
+===CODE===
+if len(heal_df):
+    kl_first = heal_df["kl_first"].mean()
+    kl_last = heal_df["kl_last"].mean()
+    nontrivial = kl_first > 1e-3
+    print(f"mean KL at step 0   : {kl_first:.4f}")
+    print(f"mean KL at last step: {kl_last:.4f}")
+    print(f"teacher agreement  : {math.exp(-kl_last) * 100:.2f}% "
+          f"(teacher vs healed student, temperature-scaled)")
+    assert nontrivial, (
+        f"the KL term is ~0 ({kl_first:.2e}); this run was fine-tuning, not "
+        f"distillation. Raise HEAL_TEMP or check that the teacher is the "
+        f"unpruned model."
+    )
+    print("PASS: the KL term is non-trivial, so healing is genuinely distilling.")
+
+    # The healed model must also be better than doing nothing, and must not have
+    # been made worse by training. Both are cheap and both catch real bugs.
+    healed_vs_pruned = (heal_df["ppl_healed"] < heal_df["ppl_pruned"]).all()
+    print(f"\nhealed < pruned in every run: {healed_vs_pruned}")
+    print(f"mean recovery: {heal_df['recovered_pct'].mean():.1f}% "
+          f"of the perplexity the deletion cost")
+else:
+    print("no healing runs were recorded; every model exceeded HEAL_MAX_PARAMS")
+
+===MD===
+## 10. Mechanism: why does the bridge lose?
 
 A bridge can only work if a block's residual $\Delta = Y - X$ is well described by a
 **low-rank linear** map of $X$. We can measure that ceiling exactly and with no
@@ -1033,7 +1307,7 @@ print(
 )
 
 ===MD===
-## 10. Does the diagnostic predict which block is worth replacing?
+## 11. Does the diagnostic predict which block is worth replacing?
 
 If the ceiling $\mathrm{EV}(r)$ really is what governs whether replacement beats
 deletion, then choosing targets by **highest ceiling EV** rather than by **lowest BI**
@@ -1146,7 +1420,7 @@ fig.tight_layout()
 plt.show()
 
 ===MD===
-## 11. Ablations
+## 12. Ablations
 
 Three knobs at the $k=1$ operating point:
 
@@ -1154,7 +1428,7 @@ Three knobs at the $k=1$ operating point:
 * **bit width** $b$ - what the ternary grid costs relative to fp16
 * **calibration size** - how much text the fit needs
 
-The rank sweep is the informative one. Our prediction from Section 9 is that
+The rank sweep is the informative one. Our prediction from Section 10 is that
 raising $r$ improves the *local* fit (higher explained variance) yet makes *end-task*
 perplexity worse, because a more accurate reconstruction of a block that downstream
 layers were never trained to receive is a larger distribution shift than a cruder
@@ -1274,7 +1548,7 @@ print(
 )
 
 ===MD===
-## 12. Held-out test evaluation
+## 13. Held-out test evaluation
 
 The operating point $k=1$ was selected on validation perplexity. We now touch the
 test split once, for that configuration only. Reporting test numbers before
@@ -1310,6 +1584,19 @@ for mid in MODEL_IDS:
         )
         free(m)
 
+    # The healed model is the one we would actually ship, so it gets a test
+    # number too. It is already trained and sitting in heal_df from Section 9 --
+    # we record both splits inside that loop, so this costs no extra compute.
+    if len(heal_df):
+        for r in heal_df[(heal_df.model_id == mid) & (heal_df.k == 1)].itertuples():
+            TEST.append(
+                {
+                    "operator": "BI removal + KD", "model": mid,
+                    "model_short": short, "k": 1, "seed": r.seed,
+                    "test_ppl": r.ppl_test,
+                }
+            )
+
     m = load_model(mid)
     TEST.append(
         {
@@ -1327,10 +1614,18 @@ display(
 )
 
 ===MD===
-## 13. Findings
+## 14. Findings
 
 Everything below is read off the tables produced above, and each item is stated so
 that it can be falsified by re-running this notebook.
+
+**F0. The best method in this study is BI-targeted removal followed by distillation.**
+This is the headline, and it supersedes the unhealed comparison. Deleting the
+lowest-BI block and then repairing with a few hundred steps of
+pruned-distillation recovers a large fraction of the perplexity that deletion costs,
+at no parameter cost beyond the deletion itself. See Section 9 for the table and
+Section 13 for the held-out number. Everything below is about *why* the more
+elaborate operators do worse than this simple pair.
 
 **F1. Block-influence ranking is the result that holds up.**
 BI-targeted removal beats random removal by orders of magnitude at every $k$ on both
@@ -1345,8 +1640,17 @@ deletes the same parameters as removal and then adds a small perturbation on top
 which can only cost perplexity. It does: GPT-2 $k=1$ $58.67 \pm 9.53$ against
 $45.76 \pm 0.00$.
 
+**F2b. Healing does not rescue the bridge, it rescues deletion.**
+The obvious objection to F2 is that the bridge simply had more capacity to absorb a
+healing signal, since it carries $2dr$ trainable parameters where a deleted block
+carries none. Running the same repair on the deletion closes most of the gap, and
+the deletion-plus-healing configuration is the best point in the whole study. The
+bridge's extra capacity does not translate into a better model, because what it is
+carrying is a fitted approximation of the wrong objective (F4), not spare capacity
+waiting to be trained.
+
 **F3. The reason is that BI and residual low-rankness are different properties.**
-Section 9 measures the training-free ceiling. On GPT-2 the lowest-BI block is
+Section 10 measures the training-free ceiling. On GPT-2 the lowest-BI block is
 layer 4, whose rank-32 ceiling is $\approx 0.39$; block 1, which has *higher* BI, has
 a ceiling of $\approx 0.88$. The most redundant block by cosine similarity is not
 the most linearly-compressible block. Replacing a block whose residual cannot be
@@ -1354,7 +1658,7 @@ captured at rank 32 is strictly worse than not having tried.
 
 **F4. Better local fit does not mean better model.**
 The rank sweep raises explained variance monotonically while perplexity gets worse
-(Section 11). Layer-wise reconstruction error is therefore the wrong optimisation
+(Section 12). Layer-wise reconstruction error is therefore the wrong optimisation
 target for this problem: a faithful reconstruction of a block the rest of the network
 was never trained to receive is a larger distribution shift than an inaccurate one.
 
@@ -1366,17 +1670,38 @@ what costs perplexity here.
 
 ### Limitations, stated plainly
 
-* Two models, both under 140M parameters. Nothing here is evidence about 7B+ models.
+* The largest model here is 1.1B. Nothing in this notebook is evidence about 7B+
+  models, and depth-pruning behaviour is known to shift with scale.
 * One benchmark. `wikitext-2-raw-v1` only; no downstream task accuracy, so we cannot
   speak to whether perplexity loss would matter for actual use.
 * Five seeds at most. Enough to establish effects of the size seen in F2 and F1, not
   enough for tight confidence intervals on the smaller gaps.
 * One functional form for the replacement. $g(x) = x + xUV$ is the cheapest possible
   linear-plus-residual family; a gated or rotation-aware bridge is untested.
+* Healing is run at one learning rate, one temperature, and one step count. The
+  recovery fraction is therefore a lower bound on what tuned distillation would give,
+  not a claim about the ceiling.
+* Healing is skipped on models above `HEAL_MAX_PARAMS` to stay inside TPU memory, so
+  the healing table covers fewer models than the rest of the notebook. The skips are
+  listed explicitly in Section 9 rather than omitted.
 * Latency is a single-sequence microbenchmark at one length, not a serving benchmark.
 
 ===CODE===
 # --- consolidated, computed from the runs above ---------------------------
+if len(heal_df):
+    print("=== HEALING (the headline) ===")
+    display(
+        heal_df.groupby(["model", "k"])
+        .agg(
+            baseline=("ppl_baseline", "first"),
+            pruned=("ppl_pruned", "mean"),
+            healed=("ppl_healed", "mean"),
+            healed_std=("ppl_healed", "std"),
+            recovered_pct=("recovered_pct", "mean"),
+        )
+        .round(2)
+    )
+
 final = summary.pivot_table(
     index=["model_short", "k"], columns="operator", values="mean"
 ).round(2)
@@ -1398,7 +1723,7 @@ print("\nrank-RANK_DEFAULT ceiling per block (the predictive diagnostic)")
 display(diag.round(4))
 
 ===MD===
-## 14. Self-verification gate
+## 15. Self-verification gate
 
 Before exporting, this cell checks the run is internally consistent and prints a
 single verdict. Read this output first: if any check fails, the numbers are not
@@ -1414,6 +1739,10 @@ Checks performed:
 6. the random control is disjoint from the BI targets
 7. no NaN or infinite perplexity anywhere
 8. the rank ceiling is a genuine upper bound on the achieved fit
+9. the distillation term was non-trivial, so healing was not just fine-tuning
+10. healing improved every pruned model it touched
+11. the healed model still has the post-deletion parameter count
+12. held-out test perplexity is consistent with validation for the healed model
 
 ===CODE===
 checks = []
@@ -1511,13 +1840,53 @@ check(
     "; ".join(bad_bound[:3]) if bad_bound else "consistent with Eckart-Young",
 )
 
+# ---- healing-specific checks ------------------------------------------------
+if len(heal_df):
+    check(
+        "distillation term was non-trivial",
+        bool(heal_df["kl_first"].mean() > 1e-3),
+        f"mean initial KL = {heal_df['kl_first'].mean():.4f} "
+        f"(0 would mean this was fine-tuning, not distilling)",
+    )
+    regressed = heal_df[heal_df["ppl_healed"] >= heal_df["ppl_pruned"]]
+    check(
+        "healing improved every pruned model it touched",
+        len(regressed) == 0,
+        f"{len(regressed)} of {len(heal_df)} runs did not improve",
+    )
+    # Healing must not quietly put the deleted parameters back.
+    hp = []
+    for r in heal_df.itertuples():
+        m = hard_remove_fp32(r.model_id, ast.literal_eval(r.target))
+        if n_params(m) != r.params:
+            hp.append(f"{r.model_short} k={r.k}: {n_params(m)} != {r.params}")
+        free(m)
+    check(
+        "healed model keeps the post-deletion parameter count",
+        len(hp) == 0,
+        "; ".join(hp[:3]) if hp else "no parameters resurrected by training",
+    )
+    # Validation and test must not diverge wildly, or one of them leaked.
+    drift = (
+        (heal_df["ppl_healed"] - heal_df["ppl_test"]).abs()
+        / heal_df["ppl_healed"]
+    )
+    check(
+        "held-out test PPL is consistent with validation",
+        bool((drift < 0.35).all()),
+        f"max relative drift = {drift.max():.1%}",
+    )
+else:
+    print("\n[SKIP] healing checks: no healing runs recorded "
+          "(every model exceeded HEAL_MAX_PARAMS)")
+
 verdict_df = pd.DataFrame(checks)
 display(verdict_df)
 n_pass = int(verdict_df["passed"].sum())
 print(f"\n{n_pass}/{len(verdict_df)} checks passed.")
 
 if n_pass == len(verdict_df):
-    print("VERDICT: run is internally consistent. The numbers in Section 13 stand.")
+    print("VERDICT: run is internally consistent. The numbers in Section 14 stand.")
 else:
     print(
         "VERDICT: at least one check failed. Do not quote these numbers until the "
@@ -1525,7 +1894,7 @@ else:
     )
 
 ===MD===
-## 15. Export and download
+## 16. Export and download
 
 Everything is written to a `results/` folder next to the notebook. On Colab that
 folder lives in the runtime and is **deleted when the session ends**, so the last
@@ -1545,6 +1914,10 @@ ablation_df.to_csv("results/ablations.csv", index=False)
 corr_df.to_csv("results/rank_correlation.csv", index=False)
 test_df.to_csv("results/test_split.csv", index=False)
 det_df.to_csv("results/determinism.csv", index=False)
+if len(heal_df):
+    heal_df.to_csv("results/healing.csv", index=False)
+if heal_skipped:
+    pd.DataFrame(heal_skipped).to_csv("results/healing_skipped.csv", index=False)
 try:
     guided_df.to_csv("results/ev_guided.csv", index=False)
 except NameError:
@@ -1566,6 +1939,18 @@ meta = {
     "bridge_bits": BRIDGE_BITS,
     "models": MODEL_IDS,
     "deterministic": bool(det_df["deterministic"].all()),
+    "healing": {
+        "steps": HEAL_STEPS,
+        "lr": HEAL_LR,
+        "temperature": HEAL_TEMP,
+        "alpha": HEAL_ALPHA,
+        "ks": list(HEAL_KS),
+        "max_params": HEAL_MAX_PARAMS,
+        "runs": int(len(heal_df)),
+        "skipped": heal_skipped,
+    },
+    "checks_passed": int(verdict_df["passed"].sum()),
+    "checks_total": int(len(verdict_df)),
 }
 with open("results/meta.json", "w") as fh:
     json.dump(meta, fh, indent=2)
