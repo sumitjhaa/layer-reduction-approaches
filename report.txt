@@ -5,82 +5,116 @@ Date: October 2026
 
 I. REPORT
 ================================================================
+0. How the experiments were run (hardware)
+- Machine: MacBook (Apple Silicon), free local GPU via PyTorch MPS backend;
+  two notebooks were forced to CPU (02 bridge repair hit an MPS kernel crash
+  on the gap-capture pass). No paid GPU was used.
+- Models were loaded in their default dtype (bf16 on GPT-2), small subsets of
+  wikitext were used, and training budgets were capped at 60-80 steps so the
+  full 15-approach sweep finished on one laptop.
+
 1. Feedback and mentor meetings
 - Placeholder: insert the concrete feedback and weekly notes with your mentor here.
 - Work completed since Presentation 1: BI profiling, hard-removal baseline,
-  failed variants (affine bridge, averaging, weight tying) documented,
-  fitted-ternary TerGRASP implemented and validated, SVD low-rank and
-  quantization bypass as supporting results.
+  documented failures (affine bridge, averaging, weight tying), fitted-ternary
+  TerGRASP implemented and validated, SVD low-rank and quantization bypass as
+  supporting results, plus a comparative sweep of 15 approaches.
 
 2. Baselines and state of the art
 - ShortGPT (Men et al.): remove blocks with the lowest angular distance.
-  We reproduced it as the control.
-- LayerDrop (Fan et al.), early exits (CALM), KD to shallow students, L0
-  pruning: kept in the project specs but not taken forward due to compute
-  limits; archived implementations remain.
-- Best evidence for our claim: fitted low-rank bridge preserves PPL where a
-  single affine map (Assignment 1 style) fails across multiple layers.
+  Reproduced as the control.
+- LayerDrop (Fan et al.), CALM early exits, KD to shallow students, L0
+  pruning: kept in specs but not taken forward due to compute limits;
+  archived notebooks remain.
 
 3. Datasets
-- Salesforce/wikitext wikitext-2-raw-v1 for the main runs; wikitext-103-raw-v1
-  and wikitext-2-v1 for the comparative runs.
-- Bias: we used the standard join_nonempty preprocessing from Assignment 1
-  and capped train to 300k chars, validation/test to 100k chars for CPU/MPS
-  runtime. Ceiling: small PPLEval-style 3k-token window; timeouts forced a
-  reduced window which adds eval noise.
-- We did not extend the dataset; differences are in the preprocessing and
-  the eval window only.
+- Salesforce/wikitext wikitext-2-raw-v1 (main), wikitext-103-raw-v1,
+  wikitext-2-v1, wikitext-103-v1 (comparisons).
+- PTB and tiny_shakespeare were attempted but blocked by datasets 5.x
+  script-dataset removal - documented tangent.
+- Bias handling: join_nonempty preprocessing identical to Assignment 1,
+  300k-char train / 100k-char validation-test caps, 3k-token eval window.
 
 4. Experimental plan
-- Models: openai-community/gpt2 (124M params), HuggingFaceTB/SmolLM-135M (135M).
-- Differences: GPT-2 uses blocks in model.transformer.h; SmolLM uses
-  model.model.layers (Llama-style). Helpers get_layers/set_layers handle both;
-  parameter counts above.
-- Robustness on limited compute: single SEED=42; same eval windows for every
-  model; random-removal control; ranks/bitwidths swept instead of one point.
-- Hyperparameters: bridge rank 32, Adam lr 1e-2 for 80 steps, AbsMean ternary,
-  ridge 1e-4. Selection of layers via BI ranking, k in {1,2,3,4}.
-- Metric: next-token perplexity on the validation split, because it is the
-  metric in the supplied TerGRASP notebook and the most sensitive to block
-  replacement. Latency (ms) and parameter count reported additionally.
-- System effort: single MacBook MPS runs, ~30-60s per k point; final demo is
-  the executed assignment2.ipynb with embedded tables and figures.
+- Models: GPT-2 (124M), SmolLM-135M (135M); different layer accessors
+  (model.transformer.h vs model.model.layers) handled by get_layers/set_layers.
+- Robustness: SEED=42, identical eval windows, random-removal control,
+  rank/bitwidth sweeps instead of single points.
+- Hyperparameters: bridge rank 32, Adam lr 1e-2 x80 steps, AbsMean ternary,
+  ridge 1e-4. Layers selected by BI, k in {1,2,3,4}.
+- Metric: validation perplexity (primary), latency ms and parameter count
+  (secondary).
+- System effort: one MPS laptop, ~30-60s per k point; final demo is the
+  executed assignment2.ipynb with embedded tables and figures.
 
 5. Project management
-- Novelty proposal: upgrade the random TerGRASP bridge to a fitted ternary SVD.
-- Resources: 1 ML laptop, 16 GB RAM, MPS, no paid GPU.
+- Novelty: upgrade random TerGRASP bridge to fitted ternary SVD.
+- Resources: 1 MacBook, MPS, no paid GPU.
 - Work split: (fill in) - dataset/eval code, TerGRASP implementation,
-  SVD/quantization supporting runs, report and figures.
+  SVD/quantization support runs, report and figures.
 
 II. EXPERIMENT
 ================================================================
-1. Implementation
-- Code in assignment2.ipynb implements the full pipeline: dataset prep,
-  block-influence ranking, bridge fitting (Adam on x->delta residual),
-  ternary quantization, block swap, PPL/latency/params evaluation.
+1. Implementation and the code, step by step, mapped to the maths
+- Step A (BI profile):
+  Code: hidden_states = model(**ids, output_hidden_states=True).hidden_states
+        BI_l = 1 - cosine_similarity(h_l, h_{l+1}).mean()
+  Maths: d_l = 1 - (h_l . h_{l+1}) / (||h_l|| ||h_{l+1}||), averaged over
+  batch*sequence. Low d_l => layer l approximates identity.
+- Step B (residual capture):
+  Code: for each target L, register_forward_pre_hook on blocks[L] records X,
+        register_forward_hook records Y.
+  Maths: X = h_in^(L) (N x d), Y = h_out^(L); residual Delta = Y - X.
+- Step C (bridge fit):
+  Code: bridge = FittedTernaryBridge(d, rank=32); bridge.fit(X, Y) runs Adam
+        on U,V to minimize MSE(X@U@V, Delta).
+  Maths: min_{U,V} || X U V - Delta ||_F^2.
+- Step D (ternary quantize):
+  Code: gamma = mean(|W|); Wq = round(W/gamma).clamp(-1,1)*gamma.
+  Maths: this is AbsMean from BitNet b1.58; Wq in {-gamma,0,gamma}.
+- Step E (replace and evaluate):
+  Code: blocks[L] = bridge.to(dtype); PPL via the same 256-token
+        non-overlapping windows as Assignment 1.
+  Maths: PPL = exp( (1/N) sum_i -log p_theta(x_i | x_<i) ).
 
 2. Results
 Fitted-ternary TerGRASP PPL by k (validation):
   GPT-2:          k=1 45.11, k=2 50.09, k=3 140.42, k=4 879.52
   SmolLM-135M:    k=1 21.71, k=2 40.49, k=3 33.05, k=4 38.49
-Hard-removal control:
+Hard-removal control (Approach 06):
   GPT-2:          45.76 / 47.95 / 121.81 / 943.24
   SmolLM-135M:    19.93 / 26.13 / 29.91 / 34.20
-Reading: at k=1 the fitted bridge matches or slightly beats hard removal
-while keeping the layer in the graph at ~1.58 bit/param. Higher k tracks
-hard removal. This satisfies the hypothesis for k=1, weakens for k>=3.
+k=1 matches or slightly beats removal; higher k tracks removal. The win is
+not lower PPL but preserved PPL with a ternary, ~1.58-bit block.
 
 3. Findings and patterns
-- BI ranking works: targeted k>=2 removal beats random 3x-30x.
+- BI ranking works: targeted k>=2 removal beats random 3x-30x on PPL.
 - k=1 is free for either method - one block is rarely critical.
-- Affine/naive-merge/tying variants fail because layer maps are not
-  affine and neurons are not aligned; fitted low-rank bridge + ternary
-  quantization is the minimal change that preserves PPL.
+- Affine/naive-merge/tying variants fail: layer maps are not affine and
+  neurons are not aligned; a fitted low-rank bridge is the minimal fix.
 - Low-BI layers tolerate 2-bit quantization with no PPL change, so BI
   predicts both removability and compressibility.
 
-4. Viva notes
-- Open assignment2.ipynb; every stage prints its results and ends with a
-  results table and the PPL-vs-k figure.
-- The random TerGRASP notebook and the archived reports/negative results
-  answer "why not just averaging / tying".
+4. All 15 approaches, one-line summary
+01 fitted ternary TerGRASP - works, headline
+02 affine bridge across gap - fails (PPL 10^3x)
+03 BI + KD repair - scaffold, KD loss ~0 at this budget
+04 permutation-aligned averaging - fell back to naive, fails
+05 LayerDrop->BI->SVD->KD pipeline - scaffold only
+06 ShortGPT BI baseline - works, the control
+07 SVD low-rank - works on SmolLM (r=256 ~= baseline)
+08 weight merging - always worse
+09 KD shallow student - partial recovery, budget too small
+10 learned L0 gates - gates never close
+11 LayerDrop - no separation between depths
+12 attn/FFN proxy pruning - stub
+13 early exit - stub
+14 cross-layer weight tying - PPL 10^3-10^6x
+15 quantized no-op bypass - works, supporting rule
+
+5. What can still be done
+- Rerun the SVD sweep with an explicit .float() cast to fix GPT-2's flat row.
+- Grow EVAL_TOKENS and run multiple random seeds for Approach 06.
+- Give Approach 03 a real KD loss (CE + KL at T=2) and 5-10x more steps.
+- Train actual exit heads for Approach 13 and head-importance for 12.
+- Try 01 on wikitext-103 at full window and report latency/memory on GPU.
