@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environments and secrets
+.venv/
+.env/
+
+# Large model weights and datasets
+data/
+pruned_test/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Output artifacts
+*.log
+.matplotlib/
