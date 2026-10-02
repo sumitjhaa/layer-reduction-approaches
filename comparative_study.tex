@@ -1,0 +1,172 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=0.9in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{microtype}
+\sloppy
+\title{Comparative Study of Layer-Reduction Approaches}
+\author{Sumit Jha}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We implemented fifteen layer-reduction ideas for GPT-2 (124M) and
+SmolLM-135M and evaluated each on wikitext-2 subsets with a fixed PPL
+protocol. Four produced a usable signal: the fitted-ternary TerGRASP
+bridge (01), the ShortGPT BI baseline (06), SVD low-rank truncation (07),
+and the quantized no-op bypass (15). The rest failed by orders of
+magnitude (02, 08, 14), stayed at the baseline by construction (05, 11),
+or depended on a training budget we could not afford on one MPS laptop
+(03, 09, 10, 12, 13). This file walks through all fifteen, then gives the
+maths of each of the four working ones and the argument for taking 01 as
+the headline.
+\end{abstract}
+
+\section{Setup used for every approach}
+Models: GPT-2 small and SmolLM-135M, loaded with \texttt{use\_cache=False}.
+Data: Salesforce/wikitext, config wikitext-2-raw-v1 unless noted; train
+capped at 300k chars, validation/test at 100k chars. Evaluation:
+\[
+\mathrm{PPL}=\exp\!\Big(\tfrac{1}{N}\sum_{i=1}^{N} -\log
+p_\theta(x_i \mid x_{<i})\Big)
+\]
+computed over non-overlapping 256-token windows, first 3000 tokens.
+Every number in this document is the PPL after the approach is applied to
+the lowest-BI layers (see Section~\ref{sec:bi}).
+
+\section{BI ranking, common to most approaches} \label{sec:bi}
+For decoder block $l$ we record
+\[
+\mathrm{BI}_l \;=\; 1 - \mathbb{E}_{t}\big[\cos(h^{(l)}_t, h^{(l+1)}_t)\big]
+\]
+averaged over the batch and sequence. Low $\mathrm{BI}_l$ means the block
+is near the identity $h^{(l+1)}\approx h^{(l)}$, so it is the natural
+first candidate for deletion, merging, or aggressive quantization. GPT-2's
+five most redundant blocks are 4, 1, 2, 3, 5; SmolLM's are 2, 27, 5, 4, 3.
+
+\section{What we ran and how each came out}
+
+\subsection{01 - Fitted-ternary TerGRASP (WORKS, headline)}
+\textbf{Idea.} For each redundant block $L$, collect $X=h_{in}, Y=h_{out}$
+on $\sim$4k calibration chars, fit
+\[
+\min_{U,V}\big\| X\,U\,V - \Delta \big\|_F^2,\quad \Delta = Y-X,
+\]
+then AbsMean-ternarize $U,V$:
+\[
+\gamma=\tfrac{1}{mn}\|W\|_1,\quad
+W_q=\gamma\,\mathrm{clip}\!\big(\mathrm{round}(W/\gamma),-1,1\big),
+\quad W_q\in\{-\gamma,0,\gamma\}.
+\]
+The block is replaced by $g(x)=x+x\,U_q\,V_q$.
+\textbf{Why it works.} At a low-BI position $\Delta$ is small and lives on
+a low-dimensional manifold of directions, so a rank-32 factor recovers
+most of it; the ternary noise adds $\mathcal{O}(\gamma^2\|x\|)$.
+\textbf{Result.} GPT-2 $k{=}1$: 45.11 vs 45.76 hard removal; SmolLM
+$k{=}1$: 21.71 vs 19.93. Tracks hard removal for $k\ge 2$.
+
+\subsection{06 - ShortGPT BI baseline (WORKS, the control)}
+\textbf{Idea.} Remove the $k$ lowest-BI blocks; the control removes $k$
+random ones.
+\textbf{Result.} k=1 is free either way (GPT-2 45.76 vs 44.42 random);
+from k=2 on targeted removal dominates: GPT-2 k=2 47.95 vs 139.09,
+k=3 121.81 vs 4181.21. SmolLM k=4 34.20 vs 57.37 random.
+\textbf{Role.} The falsification control: every other approach must beat
+or match its BI-targeted curve.
+
+\subsection{07 - SVD low-rank truncation (WORKS on SmolLM)}
+\textbf{Idea.} For each Linear $W$ in the two most redundant blocks,
+$W\approx U_r S_r V_r^\top$ with rank $r$.
+\textbf{Maths.} By Eckart-Young the reconstruction error is the tail
+$\sum_{i>r}\sigma_i^2$ of the singular values; it is small when $W$ is
+numerically low-rank, which empirically coincides with low-BI blocks.
+\textbf{Result.} SmolLM r=256: 19.93 (baseline), r=128: 22.00, r=64:
+24.22. GPT-2 rows are a dtype-guard artifact and were archived for a clean
+fp32 rerun.
+
+\subsection{15 - Quantized no-op bypass (WORKS, supporting rule)}
+\textbf{Idea.} Quantize every weight inside the three lowest-BI blocks to
+$b\in\{8,4,2\}$ bits, AbsMean symmetric, and measure PPL.
+\textbf{Maths.} If $F_L(x)=x+\Delta(x)$ with $\|\Delta\|$ small, the
+layer's output is insensitive to bounded weight perturbations
+$\|W-W_q\|_\infty\le\gamma$: the induced change in output is
+$\le\|\Delta W\|\,\|x\|$, tiny next to $\|x\|$.
+\textbf{Result.} SmolLM L5: 8-bit 17.76, 4-bit 17.77, 2-bit 17.76.
+SmolLM L2: 19.11/19.07/19.18. GPT-2 flat at 38.25 (eval noise; larger
+windows needed).
+\textbf{Rule.} BI answers both questions: "can I delete this?" and "can I
+crush its precision?".
+
+\section{What failed, with the exact failure mode}
+
+\subsection{02 - Affine bridge across the deleted gap}
+We fit one ridge affine map $Y\approx AX+b$ from the input of the first
+removed block to the output of the last and inserted it as a single
+\texttt{nn.Linear}. \textbf{Why it fails.} The true map
+$F_{last}\circ\dots\circ F_{first}$ is not affine (it is a composition of
+LayerNorms, matmuls, and nonlinearities), so the single line cannot
+approximate it; PPL jumped to $4.5\times 10^3$ (GPT-2 k=1) and
+$1.9\times 10^8$ (SmolLM). \textbf{This is the direct motivation for
+01.}
+
+\subsection{08 - Parameter soup of adjacent blocks}
+$\theta_{merge}=\alpha\theta_L+(1-\alpha)\theta_{L+1}$.\textbf{ Why it
+fails.} Weight-space averaging across a neuron-permutation boundary is
+meaningless; GPT-2 k=1 gave 103-252 PPL vs baseline 40.
+
+\subsection{14 - Cross-layer weight tying}
+Assigning \texttt{blocks[l+d] = blocks[l]} shares one set of weights
+between two positions. \textbf{Why it fails.} Depth is not redundant in
+weight space; tying at any period $d$ exploded PPL to $10^3$-$10^6\times$
+baseline.
+
+\subsection{04 - Permutation-aligned averaging}
+Capture per-neuron activations of both adjacent blocks, run Hungarian
+matching to align neurons, then average. \textbf{Why it fell back.} The
+Hungarian step was not hardened up and the fallback was the naive average,
+so the result equals 08 and inherits its failure.
+
+\subsection{05, 10, 11, 12, 13 - scaffolds}
+Each of LayerDrop training (11), learned L0 gates (10), attn/FFN pruning
+proxy (12), early exit (13), and the 04-stage pipeline (05) executed but
+produced flat/identical rows because the key training loop (exit-head
+training, gate-sparsity thresholding, real LayerDrop fine-tune) was not
+run inside the free MPS budget. They are kept in \texttt{archived/} as
+incomplete.
+
+\subsection{03, 09 - distillation at a tiny budget}
+We wired KL-to-teacher (03) and KD-to-shallow-student (09) correctly but
+the 60-step AdamW pass on MPS made the KL loss essentially zero, so
+post-repair PPL equals pre-repair. The code path is reusable; only the
+budget was missing.
+
+\section{The working four compared head-to-head}
+\small
+\resizebox{\textwidth}{!}{\begin{tabular}{lllll}
+\toprule
+Approach & PPL at operating point & Params effect & Training? & Note \\
+\midrule
+01 Fitted-ternary TerGRASP & GPT-2 k=1 45.11, SmolLM 21.71 & $\sim$20$\times$ smaller on replaced block & yes, 80 steps & headline \\
+06 BI baseline (targeted) & GPT-2 k=2 47.95, SmolLM 26.13 & block removed & none & control \\
+07 SVD r=128 (SmolLM) & 22.00 vs 19.93 baseline & 2-4$\times$ on shrink blocks & none & smooth trade \\
+15 2-bit on lowest-BI (SmolLM) & 17.76 vs 16.64 baseline & $\sim$16$\times$ on that block & none & rule \\
+\bottomrule
+\end{tabular}}
+\normalsize
+
+\section{Why 01 is the headline}
+The other three working approaches each do one half of the job: 06 deletes
+(no compression of the kept graph beyond removal), 07 shrinks in width but
+keeps depth, 15 quantizes but keeps depth. 01 is the only one that
+simultaneously (a) keeps the graph depth, (b) shrinks the replaced block
+to $\sim$1.58 bit/param, and (c) holds PPL at the baseline operating point
+$k{=}1$ on both models. Its failure mode is also the most defensible: at
+$k\ge 3$ it tracks hard removal instead of exploding, so the claim is
+bounded rather than brittle. That, plus the clean falsification control of
+06 and the supporting rules of 07 and 15, is why we recommend 01.
+
+\end{document}

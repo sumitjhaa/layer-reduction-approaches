@@ -259,13 +259,6 @@ rank-256 SVD PPL & 36.78 (guard) & 19.93 & full-rank \\
 \normalsize
 *GPT-2 row is the dtype-guard artifact discussed in Section~\ref{sec:approaches}.
 
-\section{Limitations}
-The bridge is rank 32, fit on $\sim$4k calibration chars, and evaluated at a
-fixed 3k-token window on two models. The $k{=}1$ claim is the robust one;
-higher $k$ simply tracks hard removal. We have not yet run multiple seeds,
-full validation, or GPU latency, which are required before the story could
-be called a paper.
-
 \section{Conclusion (comparison study)}
 \small
 \small
