@@ -798,9 +798,12 @@ for mid in MODEL_IDS:
     cache = collect_calibration(mid, sorted(order[: max(KS)]))
 
     # ---- baseline
+    # seed=0 rather than None: the baseline is deterministic, so it is run once,
+    # but leaving the column NaN makes any "count the seeds" audit see zero rows
+    # and report a false failure.
     m = load_model(mid)
     record(
-        "baseline", mid, 0, None,
+        "baseline", mid, 0, 0,
         ppl=perplexity(m, mid, val_text),
         params=n_params(m), size_fp16=size_fp16(m),
         latency_ms=latency_ms(m, mid, val_text),
@@ -838,17 +841,17 @@ for mid in MODEL_IDS:
 
         # ---- fitted bridge
         for seed in SEEDS:
-            m, diag = build_bridged(mid, targets, seed=seed, calib=cache)
+            m, fit_diag = build_bridged(mid, targets, seed=seed, calib=cache)
             record(
                 "fitted bridge", mid, k, seed,
                 ppl=perplexity(m, mid, val_text),
                 params=n_params(m), size_fp16=size_fp16(m),
                 latency_ms=latency_ms(m, mid, val_text),
                 mean_explained_variance=float(
-                    np.mean([d["explained_variance"] for d in diag.values()])
+                    np.mean([d["explained_variance"] for d in fit_diag.values()])
                 ),
                 mean_quantized_ev=float(
-                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                    np.mean([d["quantized_explained_variance"] for d in fit_diag.values()])
                 ),
             )
             free(m)
@@ -1174,7 +1177,12 @@ for mid in MODEL_IDS:
 
     teacher = load_model_fp32(mid)
     base_ppl = perplexity(teacher, mid, val_text)
-    print(f"{short}: healing k={HEAL_KS}, baseline={base_ppl:.2f}")
+    # The unpruned model's own val-to-test gap is the control for Section 13.
+    # wikitext validation and test are not equally hard, so an absolute
+    # val/test threshold would flag every model including a pristine one.
+    base_test_ppl = perplexity(teacher, mid, test_text)
+    print(f"{short}: healing k={HEAL_KS}, baseline val={base_ppl:.2f} "
+          f"test={base_test_ppl:.2f} (split gap {100*(base_test_ppl/base_ppl-1):+.1f}%)")
 
     for k in HEAL_KS:
         targets = sorted(order[:k])
@@ -1198,6 +1206,7 @@ for mid in MODEL_IDS:
                     "seed": seed,
                     "target": str(targets),
                     "ppl_baseline": base_ppl,
+                    "ppl_baseline_test": base_test_ppl,
                     "ppl_pruned": pre,
                     "ppl_healed": post,
                     # Recorded here, inside the same run, so the held-out number
@@ -1562,42 +1571,42 @@ for mid in MODEL_IDS:
     cache = collect_calibration(mid, target)
 
     for r in ABL_RANKS:
-        m, diag = build_bridged(mid, target, rank=r, seed=0, calib=cache)
+        m, fit_diag = build_bridged(mid, target, rank=r, seed=0, calib=cache)
         ABL.append(
             {
                 "knob": "rank", "value": r, "model": mid, "model_short": short,
                 "ppl": perplexity(m, mid, val_text), "params": n_params(m),
-                "fit_ev": float(np.mean([d["explained_variance"] for d in diag.values()])),
+                "fit_ev": float(np.mean([d["explained_variance"] for d in fit_diag.values()])),
                 "quant_ev": float(
-                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                    np.mean([d["quantized_explained_variance"] for d in fit_diag.values()])
                 ),
             }
         )
         free(m)
 
     for b in ABL_BITS:
-        m, diag = build_bridged(mid, target, bits=b, seed=0, calib=cache)
+        m, fit_diag = build_bridged(mid, target, bits=b, seed=0, calib=cache)
         ABL.append(
             {
                 "knob": "bits", "value": b, "model": mid, "model_short": short,
                 "ppl": perplexity(m, mid, val_text), "params": n_params(m),
-                "fit_ev": float(np.mean([d["explained_variance"] for d in diag.values()])),
+                "fit_ev": float(np.mean([d["explained_variance"] for d in fit_diag.values()])),
                 "quant_ev": float(
-                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                    np.mean([d["quantized_explained_variance"] for d in fit_diag.values()])
                 ),
             }
         )
         free(m)
 
     for c in ABL_CALIB:
-        m, diag = build_bridged(mid, target, calib_chars=c, seed=0)
+        m, fit_diag = build_bridged(mid, target, calib_chars=c, seed=0)
         ABL.append(
             {
                 "knob": "calib_chars", "value": c, "model": mid, "model_short": short,
                 "ppl": perplexity(m, mid, val_text), "params": n_params(m),
-                "fit_ev": float(np.mean([d["explained_variance"] for d in diag.values()])),
+                "fit_ev": float(np.mean([d["explained_variance"] for d in fit_diag.values()])),
                 "quant_ev": float(
-                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                    np.mean([d["quantized_explained_variance"] for d in fit_diag.values()])
                 ),
             }
         )
@@ -1897,16 +1906,25 @@ check(
 )
 
 # 3) seed coverage
+# The baseline is deterministic, so it is run once; every stochastic operator
+# must appear once per seed. The expectation is therefore per-operator, not a
+# single number for the whole table.
 main_ops = ["baseline", "BI removal", "random removal", "fitted bridge"]
 cov = results_df[results_df.operator.isin(main_ops)].groupby(
     ["operator", "model_short", "k"]
 )["seed"].nunique()
-expected = 1 if "baseline" in set(cov.index.get_level_values(0)) else len(SEEDS)
-short_rows = cov[cov != expected]
+want = cov.index.get_level_values(0).map(
+    lambda op: 1 if op == "baseline" else len(SEEDS)
+)
+short_rows = cov[cov.to_numpy() != np.asarray(want)]
 check(
     "every point has the full seed count",
     len(short_rows) == 0,
-    f"expected {expected}; offenders={len(short_rows)}",
+    f"{len(short_rows)} of {len(cov)} points short: "
+    + "; ".join(
+        f"{op}/{m}/k={k}: got {got}, want {w}"
+        for (op, m, k), got, w in list(zip(short_rows.index, short_rows, want))[:3]
+    ),
 )
 
 # 4) compression monotone in k
@@ -1952,28 +1970,55 @@ check(
     f"min={np.nanmin(vals):.3f} max={np.nanmax(vals):.4g}",
 )
 
-# 8) the rank ceiling really is an upper bound on the achieved local fit
-ev_col = f"ev_{RANK_DEFAULT}"
+# 8) the rank ceiling really is an upper bound on the achieved local fit.
+# The ceiling must be read at the SAME rank as the fit. Comparing a rank-64 fit
+# against the rank-32 ceiling is guaranteed to "fail" by construction, which is
+# exactly what happened the first time this check ran.
+#
+# A small tolerance is still needed: the ceiling and the fit come from two
+# independent calibration draws and two separate SVDs, so they can differ in the
+# third decimal even when both are correct. 0.01 is chosen to sit an order of
+# magnitude above that noise (observed ~0.002) while remaining far below the
+# 0.022 excess that the genuine rank-mismatch bug produced.
+EV_TOL = 0.01
 ceiling_of = {}
 for _, row in spectrum_df.iterrows():
-    if not math.isnan(row.get(ev_col, np.nan)):
-        # the ablation target is always the lowest-BI block of that model
-        order = sorted(range(len(BI[row["model"]])), key=lambda i: BI[row["model"]][i])
-        if row["layer"] == order[0]:
-            ceiling_of[row["model_short"]] = float(row[ev_col])
+    # the ablation target is always the lowest-BI block of that model
+    order = sorted(range(len(BI[row["model"]])), key=lambda i: BI[row["model"]][i])
+    if row["layer"] != order[0]:
+        continue
+    for r in SPEC_RANKS:
+        col = f"ev_{r}"
+        if not math.isnan(row.get(col, np.nan)):
+            ceiling_of[(row["model_short"], r)] = float(row[col])
 
-bad_bound = []
+bad_bound, unchecked = [], []
 for _, row in ablation_df[ablation_df.knob == "rank"].iterrows():
-    ceil = ceiling_of.get(row["model_short"])
-    if ceil is not None and row["fit_ev"] > ceil + 1e-6:
+    r = int(row["value"])
+    key = (row["model_short"], r)
+    if key not in ceiling_of:
+        unchecked.append(f"{row['model_short']} rank={r}")
+        continue
+    ceil = ceiling_of[key]
+    if row["fit_ev"] > ceil + EV_TOL:
         bad_bound.append(
-            f"{row['model_short']} rank={row['value']}: "
-            f"fit {row['fit_ev']:.3f} > ceiling {ceil:.3f}"
+            f"{row['model_short']} rank={r}: "
+            f"fit {row['fit_ev']:.4f} > ceiling {ceil:.4f} "
+            f"(excess {row['fit_ev']-ceil:+.4f})"
         )
+max_excess = max(
+    (
+        row["fit_ev"] - ceiling_of[(row["model_short"], int(row["value"]))]
+        for _, row in ablation_df[ablation_df.knob == "rank"].iterrows()
+        if (row["model_short"], int(row["value"])) in ceiling_of
+    ),
+    default=float("nan"),
+)
 check(
-    "achieved fit never exceeds the rank ceiling",
-    len(bad_bound) == 0,
-    "; ".join(bad_bound[:3]) if bad_bound else "consistent with Eckart-Young",
+    "achieved fit never exceeds the rank ceiling at the same rank",
+    len(bad_bound) == 0 and len(unchecked) == 0,
+    "; ".join(bad_bound[:3]) if bad_bound else
+    f"max excess {max_excess:+.4f} over {len(ceiling_of)} (model, rank) pairs",
 )
 
 # F1's load-bearing claim, checked rather than asserted: the BI ranking must
@@ -2022,15 +2067,34 @@ if len(heal_df):
         len(hp) == 0,
         "; ".join(hp[:3]) if hp else "no parameters resurrected by training",
     )
-    # Validation and test must not diverge wildly, or one of them leaked.
-    drift = (
-        (heal_df["ppl_healed"] - heal_df["ppl_test"]).abs()
-        / heal_df["ppl_healed"]
-    )
+    # The validation and test splits are not equally hard, so an absolute
+    # val/test tolerance fails even on a pristine model (gpt2 alone sits about
+    # 40% higher on test). The correct control is the UNPRUNED model's own split
+    # gap: the healed model must not drift relative to that baseline by more
+    # than pruning plausibly explains.
+    drift_rows = []
+    for short, g in heal_df.groupby("model"):
+        base_drift = g["ppl_baseline_test"].iloc[0] / g["ppl_baseline"].iloc[0] - 1.0
+        heal_drift = (g["ppl_test"] / g["ppl_healed"] - 1.0).mean()
+        drift_rows.append(
+            {
+                "model": short,
+                "unpruned_val_to_test": base_drift,
+                "healed_val_to_test": heal_drift,
+                "excess_over_unpruned": heal_drift - base_drift,
+            }
+        )
+    drift_df = pd.DataFrame(drift_rows)
+    display(drift_df.round(3))
     check(
-        "held-out test PPL is consistent with validation",
-        bool((drift < 0.35).all()),
-        f"max relative drift = {drift.max():.1%}",
+        "held-out test PPL tracks the unpruned model's own split gap",
+        bool((drift_df["excess_over_unpruned"].abs() < 0.25).all()),
+        "; ".join(
+            f"{r.model}: unpruned {r.unpruned_val_to_test:+.1%} vs "
+            f"healed {r.healed_val_to_test:+.1%} "
+            f"(excess {r.excess_over_unpruned:+.1%})"
+            for r in drift_df.itertuples()
+        ),
     )
 else:
     print("\n[SKIP] healing checks: no healing runs recorded "
