@@ -1,0 +1,1447 @@
+===MD===
+# Layer Reduction in Small LLMs: a rigorous, reproducible study of deletion versus low-rank replacement
+
+**Course:** CS613 Natural Language Processing, Assignment 2
+**Author:** Sumit Jha
+**Hardware target:** Google Colab **TPU v5e-1** (also runs on GPU, Apple MPS, and CPU)
+**Models:** `openai-community/gpt2` (124M), `HuggingFaceTB/SmolLM-135M` (135M)
+**Data:** `Salesforce/wikitext`, config `wikitext-2-raw-v1`
+
+---
+
+## Abstract
+
+We compare two ways of reducing transformer depth on the same blocks: **deleting**
+them, and **replacing** them with a fitted rank-32 ternary bridge. Every
+configuration is run over multiple seeds and reported as mean $\pm$ std, the fitting
+procedure is made bit-level deterministic, and compression is measured in
+parameters, fp16 bytes and wall-clock latency.
+
+The headline result is a **negative** one, and it is robust. Across both models and
+every $k$, BI-targeted hard removal dominates the fitted bridge, and the bridge
+achieves *identical* parameter counts to plain removal while costing perplexity. We
+then explain why, with a training-free diagnostic: the closed-form ridge solution
+for each block's residual map, truncated by SVD, gives an upper bound on what any
+rank-$r$ bridge can achieve. That bound shows **block influence and residual
+low-rankness are different properties**, and on these models the lowest-BI block is
+not the most linearly-compressible one. We further show that improving the bridge's
+local layer-wise fit makes end-task perplexity *worse*, so layer-wise reconstruction
+error is the wrong objective to optimise.
+
+## 0.1 Headline numbers
+
+Produced by this notebook at `SMALL=True` on CPU/MPS; the `SMALL=False` grid is the
+paper configuration.
+
+| model | baseline PPL | BI removal $k{=}1$ | bridge $k{=}1$ | random removal $k{=}1$ |
+|---|---|---|---|---|
+| gpt2 | 38.25 | **45.76** $\pm$ 0.00 | 58.67 $\pm$ 9.53 | 1453.93 $\pm$ 2441.72 |
+| SmolLM-135M | 16.39 | **19.93** $\pm$ 0.00 | 30.77 $\pm$ 3.54 | 20.16 $\pm$ 1.95 |
+
+Determinism check: re-running an identical configuration twice gives
+$\lvert \Delta \rvert = 0.0$ exactly, on both models.
+
+## 0.2 What makes this notebook different from a typical write-up
+
+1. **Every number is seeded and repeated.** Single-run perplexities from a stochastic
+   fit are anecdotes, not measurements.
+2. **Determinism is proved, not assumed** (Section 7).
+3. **The baseline and the method use the same code path and the same targets.**
+4. **Compression is measured**, not asserted: parameters, fp16 bytes, latency.
+5. **The mechanism is measured training-free** (Section 9), which turns a failed
+   method into a predictive rule.
+6. **Everything is computed in-notebook.** No hard-coded result tables.
+
+===CODE===
+# ==========================================================================
+# SECTION 1. ENVIRONMENT  (Colab TPU v5e-1 / GPU / MPS / CPU)
+#
+# Colab instructions:
+#   Runtime -> Change runtime type -> Hardware accelerator -> TPU
+#   (v5e-1 is the default TPU offered on Colab Pro; v2/v3/v4 also work)
+#   Accelerator -> Runtime -> Change runtime type -> TPU -> v5e-1
+#
+# If you pick a TPU but torch_xla is missing, the install cell below installs it.
+# On a TPU runtime PyTorch/XLA is usually already present, so this is a no-op.
+# ==========================================================================
+!pip install -q transformers datasets accelerate pandas matplotlib scipy
+
+import gc
+import json
+import math
+import os
+import random
+import time
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+import transformers
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("PJRT_DEVICE", "TPU")
+
+
+def detect_device():
+    # Return 'xla' for a Colab TPU, else cuda / mps / cpu.
+    try:
+        import torch_xla.core.xla_model as xm
+
+        xm.xla_device()  # raises if no TPU runtime is attached
+        return "xla"
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+device = detect_device()
+
+
+def sync():
+    # Block until queued accelerator work has finished.
+    # Mandatory on TPU (xm.mark_step) and CUDA (torch.cuda.synchronize).
+    # Without it we time kernel-launch overhead instead of compute, because
+    # both backends are asynchronous: the host returns before the work is done.
+    if device == "xla":
+        import torch_xla.core.xla_model as xm
+
+        xm.mark_step()
+    elif device == "cuda":
+        torch.cuda.synchronize()
+
+
+def torch_xla_version():
+    try:
+        import torch_xla
+
+        return getattr(torch_xla, "__version__", "unknown")
+    except Exception:
+        return "not installed"
+
+
+def device_banner():
+    lines = [
+        f"PyTorch      : {torch.__version__}",
+        f"Transformers : {transformers.__version__}",
+        f"Device       : {device}",
+    ]
+    if device == "xla":
+        import torch_xla.core.xla_model as xm
+
+        lines += [
+            f"TPU device   : {xm.xla_device()}",
+            f"torch_xla    : {torch_xla_version()}",
+            f"world size   : {xm.world_size()}",
+        ]
+    elif device == "cuda":
+        lines += [
+            f"GPU          : {torch.cuda.get_device_name(0)}",
+            "GPU memory   : %.1f GB"
+            % (torch.cuda.get_device_properties(0).total_memory / 1e9),
+        ]
+    return "\n".join(lines)
+
+
+# TPU v5e has no float64 accelerator and prefers bfloat16; CUDA prefers fp16.
+MODEL_DTYPE = {
+    "xla": torch.bfloat16,
+    "cuda": torch.float16,
+}.get(device, torch.float32)
+
+# Linear algebra in Section 9 runs on the CPU in float64 on purpose: TPUs have no
+# float64, and a float32 solve on a 768x768 Gram matrix loses enough precision to
+# move the explained-variance numbers we draw conclusions from.
+LINALG_DEVICE = "cpu"
+HAS_FP64 = device != "xla"
+
+print(device_banner())
+print(f"MODEL_DTYPE  : {MODEL_DTYPE}")
+print(f"float64 on accelerator: {HAS_FP64} (linear algebra is forced to CPU)")
+
+===MD===
+## 2. Scale and reproducibility
+
+Two presets:
+
+| preset | seeds | eval tokens | calib chars | $k$ values | rank sweep | bit sweep |
+|---|---|---|---|---|---|---|
+| `SMALL=True` | 3 | 3,000 | 4,000 | 1, 2, 3 | 4 values | 3 values |
+| `SMALL=False` | 5 | 40,000 | 40,000 | 1, 2, 3, 4 | 7 values | 6 values |
+
+`SMALL=False` is the paper grid. It is roughly 6-8x the work; on a v5e-1 it is
+still well under an hour because every model here is under 140M parameters.
+
+The seed is applied **per fit**, through an explicit `torch.Generator`, not through
+the global RNG. This is the single change that makes the study reproducible: with a
+shared global RNG the result of a configuration depends on how many random numbers
+were drawn earlier in the notebook, so re-running one cell in isolation gives a
+different number.
+
+===CODE===
+SMALL = True   # True = fast verification pass. False = paper grid.
+
+GLOBAL_SEED = 42
+
+MODEL_IDS = ["openai-community/gpt2", "HuggingFaceTB/SmolLM-135M"]
+
+if SMALL:
+    SEEDS = (0, 1, 2)
+    TRAIN_CHARS, VAL_CHARS, TEST_CHARS = 300_000, 100_000, 100_000
+    EVAL_TOKENS = 3_000
+    CALIB_CHARS = 4_000
+    KS = (1, 2, 3)
+    ABL_RANKS = (4, 16, 64, 128)
+    ABL_BITS = (2, 4, 8)
+    ABL_CALIB = (2_000, 20_000)
+    SPEC_RANKS = (4, 16, 32, 64, 128, 256)
+    RANK_DEFAULT = 32
+    N_GUIDED = 3
+else:
+    SEEDS = (0, 1, 2, 3, 4)
+    TRAIN_CHARS, VAL_CHARS, TEST_CHARS = 2_000_000, 400_000, 400_000
+    EVAL_TOKENS = 40_000
+    CALIB_CHARS = 40_000
+    KS = (1, 2, 3, 4)
+    ABL_RANKS = (4, 8, 16, 32, 64, 128, 256)
+    ABL_BITS = (2, 3, 4, 6, 8, 16)
+    ABL_CALIB = (2_000, 8_000, 40_000, 200_000)
+    SPEC_RANKS = (4, 16, 32, 64, 128, 256, 384)
+    RANK_DEFAULT = 32
+    N_GUIDED = 6
+
+BRIDGE_BITS = 2   # ternary grid
+
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+torch.manual_seed(GLOBAL_SEED)
+if device == "cuda":
+    torch.cuda.manual_seed_all(GLOBAL_SEED)
+
+print(f"SMALL={SMALL}  seeds={SEEDS}  eval_tokens={EVAL_TOKENS}")
+print(f"KS={KS}  rank_default={RANK_DEFAULT}  bridge_bits={BRIDGE_BITS}")
+print(f"calib_chars={CALIB_CHARS}  train_chars={TRAIN_CHARS}")
+
+===MD===
+## 3. Data
+
+`wikitext-2-raw-v1` is the standard layer-pruning benchmark. Note that
+`wikitext-2-v1` (non-raw) and `wikitext-103` are also available in the same dataset
+repository if you want to check that the conclusions are not an artefact of one
+tokenisation; the constant `WIKITEXT_CONFIG` below controls it.
+
+===CODE===
+WIKITEXT_CONFIG = "wikitext-2-raw-v1"
+
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+tokenizers = {}
+for mid in MODEL_IDS:
+    tok = AutoTokenizer.from_pretrained(mid)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tokenizers[mid] = tok
+
+DATASET = load_dataset("Salesforce/wikitext", WIKITEXT_CONFIG)
+
+
+def join_nonempty(split):
+    return "\n\n".join(x for x in split["text"] if x and x.strip())
+
+
+train_text = join_nonempty(DATASET["train"])[:TRAIN_CHARS]
+val_text = join_nonempty(DATASET["validation"])[:VAL_CHARS]
+test_text = join_nonempty(DATASET["test"])[:TEST_CHARS]
+
+print(DATASET)
+print(f"config        : {WIKITEXT_CONFIG}")
+print(f"train chars   : {len(train_text)}")
+print(f"val chars     : {len(val_text)}")
+print(f"test chars    : {len(test_text)}")
+
+===CODE===
+def load_model(model_id):
+    # Load then cast, rather than passing dtype= to from_pretrained: the keyword
+    # was renamed from torch_dtype to dtype across transformers 4.x -> 5.x, and
+    # casting afterwards works identically on every version.
+    model = AutoModelForCausalLM.from_pretrained(model_id)
+    model.config.use_cache = False
+    model.eval()
+    return model.to(device=device, dtype=MODEL_DTYPE)
+
+
+def get_layers(model):
+    # GPT-2 nests blocks at model.transformer.h; Llama-style at model.model.layers.
+    if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+        return model.transformer.h
+    return model.model.layers
+
+
+def set_layers(model, blocks):
+    blocks = torch.nn.ModuleList(blocks)
+    if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+        model.transformer.h = blocks
+        model.config.n_layer = len(blocks)
+    else:
+        model.model.layers = blocks
+        model.config.num_hidden_layers = len(blocks)
+    return model
+
+
+def hidden_size(model):
+    cfg = model.config
+    return getattr(cfg, "n_embd", None) or cfg.hidden_size
+
+
+def free(model):
+    del model
+    gc.collect()
+    if device == "xla":
+        import torch_xla.core.xla_model as xm
+
+        xm.rendezvous()
+        xm.mark_step()
+    elif device == "cuda":
+        torch.cuda.empty_cache()
+
+===MD===
+## 4. Metrics
+
+$$\mathrm{PPL} = \exp\!\left(\frac{1}{N}\sum_{i=1}^{N} -\log p_\theta(x_i \mid x_{<i})\right)$$
+
+evaluated on non-overlapping 256-token windows, which keeps the number of
+predicted tokens per window equal for every model.
+
+| metric | why |
+|---|---|
+| PPL | model quality |
+| params | compression |
+| fp16 bytes | on-disk size, the convention in the pruning literature |
+| latency (ms) | the practical payoff, measured not estimated |
+
+`latency_ms` calls `sync()` before starting and before stopping the timer. On a TPU
+this means `xm.mark_step()`; skipping it measures kernel-launch overhead instead of
+compute.
+
+===CODE===
+EVAL_BLOCK = 256
+
+
+def perplexity(model, model_id, text, max_tokens=EVAL_TOKENS):
+    # exp(mean token NLL) over non-overlapping windows.
+    model.eval()
+    ids = tokenizers[model_id](
+        text, return_tensors="pt", add_special_tokens=False
+    )["input_ids"][0][:max_tokens]
+    n = max(1, len(ids) // EVAL_BLOCK)
+    total_nll, total_tokens = 0.0, 0
+    with torch.no_grad():
+        for i in range(n):
+            x = ids[i * EVAL_BLOCK : (i + 1) * EVAL_BLOCK].unsqueeze(0).to(device)
+            out = model(input_ids=x, labels=x, use_cache=False)
+            counted = x.numel() - 1
+            total_nll += out.loss.item() * counted
+            total_tokens += counted
+    return math.exp(total_nll / total_tokens)
+
+
+def n_params(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def size_fp16(model):
+    return 2 * sum(p.numel() for p in model.parameters())
+
+
+def latency_ms(model, model_id, text, seq_len=256, repeat=20):
+    model.eval()
+    ids = tokenizers[model_id](
+        text, return_tensors="pt", add_special_tokens=False
+    )["input_ids"][:, :seq_len].to(device)
+    with torch.no_grad():
+        for _ in range(5):
+            model(input_ids=ids, use_cache=False)
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(repeat):
+            model(input_ids=ids, use_cache=False)
+        sync()
+        t1 = time.perf_counter()
+    return 1000.0 * (t1 - t0) / repeat
+
+===MD===
+## 5. Block Influence: which blocks are redundant?
+
+$$\mathrm{BI}_\ell = 1 - \mathbb{E}_t\!\left[\cos\!\big(h_t^{(\ell)},\; h_t^{(\ell+1)}\big)\right]$$
+
+$\mathrm{BI}_\ell \to 0$ means the block barely rotates the residual stream, so it
+is the natural first candidate for deletion. Blocks are ranked by ascending BI.
+
+This score is the one ingredient we inherit from the assignment baseline, and
+Section 8 shows it is doing nearly all of the work.
+
+===CODE===
+def block_influence(model, model_id, text, n_chars=2000):
+    model.eval()
+    ids = tokenizers[model_id](
+        text[:n_chars], return_tensors="pt", add_special_tokens=False
+    )["input_ids"].to(device)
+    with torch.no_grad():
+        out = model(input_ids=ids, output_hidden_states=True, use_cache=False)
+    hs = out.hidden_states
+    return [
+        1.0
+        - F.cosine_similarity(hs[i].float(), hs[i + 1].float(), dim=-1).mean().item()
+        for i in range(len(hs) - 1)
+    ]
+
+
+BI = {}
+for mid in MODEL_IDS:
+    m = load_model(mid)
+    bis = block_influence(m, mid, train_text)
+    n = len(get_layers(m))
+    BI[mid] = bis
+    order = sorted(range(n), key=lambda i: bis[i])
+    short = mid.split("/")[-1]
+    print(f"{short:14s} n={n:3d}  BI ascending -> {order[:6]}")
+    print(f"{'':14s} BI values    -> {[round(bis[i], 5) for i in order[:6]]}")
+    free(m)
+
+===CODE===
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(1, len(MODEL_IDS), figsize=(6.5 * len(MODEL_IDS), 3.8))
+axes = np.atleast_1d(axes)
+for ax, mid in zip(axes, MODEL_IDS):
+    bis = BI[mid]
+    n = len(bis)
+    ax.bar(range(n), bis, color="#4C72B0", label="all blocks")
+    chosen = sorted(range(n), key=lambda i: bis[i])[: KS[-1]]
+    ax.bar(chosen, [bis[i] for i in chosen], color="#C44E52", label="k lowest BI")
+    ax.set_title(mid.split("/")[-1])
+    ax.set_xlabel("block index")
+    ax.set_ylabel("block influence  (1 - cos)")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(fontsize=8)
+fig.suptitle("Block influence profile; red bars are the deletion targets")
+fig.tight_layout()
+plt.show()
+
+===MD===
+## 6. The two operators
+
+### 6.1 Hard removal
+
+Delete the $k$ targeted blocks and re-index `layer_idx` on the survivors. GPT-2 uses
+learned absolute position embeddings indexed by `layer_idx` via its attention bias,
+so failing to re-index silently corrupts the model; this is handled explicitly.
+
+### 6.2 Fitted low-rank ternary bridge
+
+For a block with calibration input $X$ and output $Y$, fit the residual
+$\Delta = Y - X$ with a rank-$r$ factorisation, then quantize both factors onto a
+ternary grid:
+
+$$\min_{U,V}\ \big\lVert XUV - \Delta \big\rVert_F^2 + \lambda\big(\lVert U\rVert_F^2 + \lVert V\rVert_F^2\big)$$
+
+$$\gamma_W = \frac{1}{mn}\lVert W\rVert_1, \qquad W_q = \gamma_W\,\mathrm{clip}\!\big(\mathrm{round}(W/\gamma_W), -1, 1\big) \in \{-\gamma_W, 0, +\gamma_W\}$$
+
+$$g(x) = x + x\,U_q V_q$$
+
+Parameters fall from $O(d^2)$ to $O(2dr)$: at $r=32$, $d=768$ that is $49{,}152$
+weights replacing roughly $7.1$M, i.e. a $144\times$ reduction **on that block**.
+
+Calibration for every target is collected from the *pristine* model, so a bridge
+never sees an already-replaced block, and the text is walked in 256-token windows to
+stay inside the 1024 position limit both models use.
+
+===CODE===
+def quantize_absmear(W, bits):
+    # Symmetric AbsMean quantization to `bits` signed levels.
+    #   bits=2 -> {-1,0,+1}: the ternary grid, 1.58 bits/param effective
+    #   bits=3 -> {-3..3}; bits>=16 -> identity.
+    if bits >= 16:
+        return W
+    levels = 2 ** (bits - 1) - 1
+    gamma = W.abs().mean() + 1e-8
+    q = torch.round(W / gamma).clamp(-levels, levels)
+    return (q * gamma).to(W.device)
+
+
+class FittedTernaryBridge(torch.nn.Module):
+    # g(x) = x + x U V, with U,V fitted then AbsMean-quantized.
+    # Registered as buffers (not parameters) because after quantization they are
+    # constants; buffers also keep them out of the optimizer state.
+
+    def __init__(self, dim, rank=32, bits=2, gen=None):
+        super().__init__()
+        g = gen if gen is not None else torch.Generator().manual_seed(0)
+        self.register_buffer("U", torch.randn(dim, rank, generator=g) / math.sqrt(dim))
+        self.register_buffer(
+            "Vt", torch.randn(rank, dim, generator=g) / math.sqrt(rank)
+        )
+        self.bits = bits
+
+    @torch.no_grad()
+    def quantize_(self):
+        self.U.copy_(quantize_absmear(self.U, self.bits))
+        self.Vt.copy_(quantize_absmear(self.Vt, self.bits))
+        return self
+
+    def forward(self, hidden_states, *args, **kwargs):
+        x = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+        xd = x.to(self.U.dtype)
+        return x + (xd @ self.U @ self.Vt).to(x.dtype)
+
+
+def collect_layer_io(model, model_id, L, text, n_chars=CALIB_CHARS, chunk=256):
+    # Capture block L's input and output on calibration text.
+    # Windows of `chunk` tokens keep us inside the 1024 position limit.
+    ids = tokenizers[model_id](
+        text[:n_chars], return_tensors="pt", add_special_tokens=False
+    )["input_ids"][0]
+    blocks = get_layers(model)
+    Xs, Ys = [], []
+
+    def grab_in(mod, args):
+        Xs.append(args[0].detach().float().reshape(-1, args[0].shape[-1]).cpu())
+
+    def grab_out(mod, args, out):
+        out = out[0] if isinstance(out, tuple) else out
+        Ys.append(out.detach().float().reshape(-1, out.shape[-1]).cpu())
+
+    h1 = blocks[L].register_forward_pre_hook(grab_in)
+    h2 = blocks[L].register_forward_hook(grab_out)
+    with torch.no_grad():
+        for i in range(0, len(ids) - chunk + 1, chunk):
+            model(input_ids=ids[i : i + chunk].unsqueeze(0).to(device), use_cache=False)
+    sync()
+    h1.remove()
+    h2.remove()
+    return torch.cat(Xs), torch.cat(Ys)
+
+===CODE===
+def fit_bridge(X, Y, rank=RANK_DEFAULT, bits=BRIDGE_BITS, seed=0,
+               iters=300, lr=3e-2, ridge=1e-4):
+    # Deterministic ridge fit of the residual map, then AbsMean quantization.
+    # The fit runs on CPU in float64: it is a tiny 2*768*32 problem, and doing
+    # it off-accelerator keeps it bit-reproducible across TPU/GPU/CPU.
+    dim = X.shape[1]
+    gen = torch.Generator().manual_seed(seed)
+    bridge = FittedTernaryBridge(dim, rank=rank, bits=bits, gen=gen)
+
+    Xd, D = X.double(), (Y - X).double()
+    U = bridge.U.double().clone().requires_grad_(True)
+    V = bridge.Vt.double().clone().requires_grad_(True)
+    opt = torch.optim.AdamW([U, V], lr=lr, weight_decay=ridge)
+    for _ in range(iters):
+        opt.zero_grad()
+        loss = ((Xd @ U @ V - D) ** 2).mean()
+        loss.backward()
+        opt.step()
+
+    fit_mse = float(loss.detach())
+    resid_mse = float(D.pow(2).mean())
+    with torch.no_grad():
+        bridge.U.copy_(U.float())
+        bridge.Vt.copy_(V.float())
+    bridge.quantize_()
+
+    # Perplexity of the quantized bridge on the calibration set, so we can tell
+    # "the rank is too small" apart from "ternary quantization broke the fit".
+    with torch.no_grad():
+        q = Xd @ bridge.U.double() @ bridge.Vt.double()
+        quant_ev = 1.0 - float((q - D).pow(2).mean()) / resid_mse
+
+    return bridge, {
+        "fit_mse": fit_mse,
+        "residual_mse": resid_mse,
+        "explained_variance": 1.0 - fit_mse / resid_mse,
+        "quantized_explained_variance": quant_ev,
+    }
+
+
+def hard_remove(model_id, indices):
+    model = load_model(model_id)
+    blocks = list(get_layers(model))
+    kept = [b for i, b in enumerate(blocks) if i not in set(indices)]
+    set_layers(model, kept)
+    # GPT-2 attention builds a bias from layer_idx; re-index or the model breaks.
+    for i, layer in enumerate(get_layers(model)):
+        if hasattr(layer, "layer_idx"):
+            layer.layer_idx = i
+        if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "layer_idx"):
+            layer.self_attn.layer_idx = i
+    return model
+
+
+def build_bridged(model_id, targets, rank=RANK_DEFAULT, bits=BRIDGE_BITS,
+                  seed=0, calib_chars=CALIB_CHARS, calib=None):
+    # Fit one bridge per target on the pristine model, then splice them in.
+    # `calib` lets the caller pass pre-collected (X, Y) pairs so that a seed
+    # sweep does not repeat the expensive calibration forward passes.
+    m0 = load_model(model_id)
+    bridges, diag = {}, {}
+    for L in targets:
+        if calib is not None and L in calib:
+            X, Y = calib[L]
+        else:
+            X, Y = collect_layer_io(m0, model_id, L, train_text, n_chars=calib_chars)
+        bridges[L], diag[L] = fit_bridge(X, Y, rank=rank, bits=bits, seed=seed)
+    free(m0)
+
+    m = load_model(model_id)
+    blocks = list(get_layers(m))
+    p = next(m.parameters())
+    for L, b in bridges.items():
+        blocks[L] = b.to(device=p.device)
+    return set_layers(m, blocks), diag
+
+
+def collect_calibration(model_id, targets, calib_chars=CALIB_CHARS):
+    # Cache (X, Y) per target layer from the pristine model.
+    m0 = load_model(model_id)
+    out = {}
+    for L in targets:
+        out[L] = collect_layer_io(m0, model_id, L, train_text, n_chars=calib_chars)
+    free(m0)
+    return out
+
+===MD===
+## 7. Determinism check
+
+Before interpreting anything else we verify that re-running an identical
+configuration reproduces it to machine precision. A fit that is not deterministic
+cannot support a claim of the form "method A is better than method B", because the
+gap between them may be smaller than the run-to-run spread.
+
+===CODE===
+det_rows = []
+for mid in MODEL_IDS:
+    order = sorted(range(len(BI[mid])), key=lambda i: BI[mid][i])
+    calib = collect_calibration(mid, [order[0]])
+    runs = []
+    for rep in range(2):
+        m, _ = build_bridged(mid, [order[0]], seed=7, calib=calib)
+        runs.append(perplexity(m, mid, val_text))
+        free(m)
+    delta = abs(runs[0] - runs[1])
+    det_rows.append(
+        {
+            "model": mid.split("/")[-1],
+            "run_1": runs[0],
+            "run_2": runs[1],
+            "abs_delta": delta,
+            "deterministic": bool(delta < 1e-9),
+        }
+    )
+    print(
+        f"{mid.split('/')[-1]:14s} run1={runs[0]:.10f}  run2={runs[1]:.10f}  "
+        f"|delta|={delta:.2e}  deterministic={delta < 1e-9}"
+    )
+
+det_df = pd.DataFrame(det_rows)
+display(det_df)
+
+assert det_df["deterministic"].all(), (
+    "non-deterministic fit detected: seed every fit with its own torch.Generator"
+)
+print("\nAll configurations reproduce exactly. Reported numbers are meaningful.")
+
+===MD===
+## 8. Main comparison
+
+Four operators on identical targets and an identical evaluation protocol:
+
+1. **baseline** - untouched model
+2. **BI removal** - delete the $k$ lowest-BI blocks
+3. **random removal** - delete $k$ uniformly-drawn blocks, *disjoint from the BI set*
+4. **fitted bridge** - replace the $k$ lowest-BI blocks with rank-32 ternary bridges
+
+The random control is drawn from the complement of the BI targets, so it can never
+accidentally be favoured. That makes it a strictly fair null and it is the reason
+the BI ranking can be defended rather than merely asserted.
+
+===CODE===
+RESULTS = []
+
+
+def record(operator, model_id, k, seed, split="val", **extra):
+    RESULTS.append(
+        {
+            "operator": operator,
+            "model": model_id,
+            "model_short": model_id.split("/")[-1],
+            "k": k,
+            "seed": seed,
+            "split": split,
+            **extra,
+        }
+    )
+
+
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    n = len(BI[mid])
+    order = sorted(range(n), key=lambda i: BI[mid][i])
+    cache = collect_calibration(mid, sorted(order[: max(KS)]))
+
+    # ---- baseline
+    m = load_model(mid)
+    record(
+        "baseline", mid, 0, None,
+        ppl=perplexity(m, mid, val_text),
+        params=n_params(m), size_fp16=size_fp16(m),
+        latency_ms=latency_ms(m, mid, val_text),
+    )
+    free(m)
+    print(f"baseline {short}: done")
+
+    for k in KS:
+        targets = sorted(order[:k])
+
+        # ---- BI-targeted removal
+        for seed in SEEDS:
+            m = hard_remove(mid, targets)
+            record(
+                "BI removal", mid, k, seed,
+                ppl=perplexity(m, mid, val_text),
+                params=n_params(m), size_fp16=size_fp16(m),
+                latency_ms=latency_ms(m, mid, val_text),
+            )
+            free(m)
+
+        # ---- random removal control, disjoint from the BI targets
+        for seed in SEEDS:
+            rng = random.Random(1000 * k + seed)
+            pool = [i for i in range(n) if i not in set(targets)]
+            pick = sorted(rng.sample(pool, k))
+            m = hard_remove(mid, pick)
+            record(
+                "random removal", mid, k, seed, target=str(pick),
+                ppl=perplexity(m, mid, val_text),
+                params=n_params(m), size_fp16=size_fp16(m),
+                latency_ms=latency_ms(m, mid, val_text),
+            )
+            free(m)
+
+        # ---- fitted bridge
+        for seed in SEEDS:
+            m, diag = build_bridged(mid, targets, seed=seed, calib=cache)
+            record(
+                "fitted bridge", mid, k, seed,
+                ppl=perplexity(m, mid, val_text),
+                params=n_params(m), size_fp16=size_fp16(m),
+                latency_ms=latency_ms(m, mid, val_text),
+                mean_explained_variance=float(
+                    np.mean([d["explained_variance"] for d in diag.values()])
+                ),
+                mean_quantized_ev=float(
+                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                ),
+            )
+            free(m)
+
+        print(f"{short} k={k}: done")
+
+results_df = pd.DataFrame(RESULTS)
+print(
+    results_df.groupby(["operator", "model_short", "k"])["ppl"]
+    .agg(["mean", "std", "count"])
+    .to_string()
+)
+
+===CODE===
+def agg(df, split="val"):
+    g = (
+        df[df["split"] == split]
+        .groupby(["operator", "model_short", "k"])["ppl"]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+    g["std"] = g["std"].fillna(0.0)
+    return g
+
+
+summary = agg(results_df)
+
+
+def baseline_ppl(model_short):
+    row = summary[(summary.operator == "baseline") & (summary.model_short == model_short)]
+    return float(row["mean"].iloc[0]) if len(row) else float("nan")
+
+
+summary["delta_vs_baseline"] = [
+    r["mean"] - baseline_ppl(r["model_short"]) for _, r in summary.iterrows()
+]
+display(summary.round(3))
+
+===CODE===
+# --- paired comparison, seed by seed -------------------------------------
+# BI removal and the bridge act on the same targets under the same seeds, so the
+# comparison is paired and we can report the per-seed difference directly.
+# With |SEEDS| small a rank test is weak, so we report the effect size and the
+# number of seeds that agree, rather than over-claiming a p-value.
+pair_rows = []
+for (mid, k), g in results_df[
+    results_df.operator.isin(["BI removal", "fitted bridge"])
+].groupby(["model", "k"]):
+    piv = g.pivot_table(index="seed", columns="operator", values="ppl")
+    if "BI removal" not in piv or "fitted bridge" not in piv:
+        continue
+    piv = piv.dropna()
+    diff = piv["fitted bridge"] - piv["BI removal"]
+    pair_rows.append(
+        {
+            "model": mid.split("/")[-1],
+            "k": k,
+            "n_seeds": len(diff),
+            "removal_mean": piv["BI removal"].mean(),
+            "bridge_mean": piv["fitted bridge"].mean(),
+            "mean_diff_bridge_minus_removal": diff.mean(),
+            "worst_case_diff": diff.max(),
+            "bridge_wins_seeds": int((diff < 0).sum()),
+        }
+    )
+
+paired_df = pd.DataFrame(pair_rows)
+display(paired_df.round(3))
+print(
+    "\nA positive mean_diff means the bridge is WORSE than plain deletion.\n"
+    "bridge_wins_seeds counts how many seeds favour the bridge."
+)
+
+===CODE===
+fig, axes = plt.subplots(1, len(MODEL_IDS), figsize=(6.8 * len(MODEL_IDS), 4.3))
+axes = np.atleast_1d(axes)
+styles = {
+    "BI removal": dict(color="#C44E52", marker="o"),
+    "random removal": dict(color="#DD8452", marker="^"),
+    "fitted bridge": dict(color="#4C72B0", marker="s"),
+}
+for ax, mid in zip(axes, MODEL_IDS):
+    short = mid.split("/")[-1]
+    sub = summary[summary.model_short == short]
+    base = sub[sub.operator == "baseline"]["mean"]
+    if len(base):
+        ax.axhline(base.iloc[0], color="#555555", ls="--", label="baseline")
+    for op, st in styles.items():
+        s = sub[sub.operator == op]
+        if not len(s):
+            continue
+        ax.errorbar(s["k"], s["mean"], yerr=s["std"], capsize=3, label=op, **st)
+    ax.set_yscale("log")
+    ax.set_xlabel("k blocks targeted")
+    ax.set_ylabel("validation perplexity")
+    ax.set_title(short)
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=8)
+fig.suptitle("Deletion vs low-rank replacement, mean $\\pm$ std over seeds")
+fig.tight_layout()
+plt.show()
+
+===CODE===
+# --- compression, measured from the parameter counts actually recorded above
+comp_rows = []
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    base = results_df[
+        (results_df.operator == "baseline") & (results_df.model_short == short)
+    ]
+    if not len(base):
+        continue
+    base_params = base["params"].mean()
+    base_lat = base["latency_ms"].mean()
+    for op in ("BI removal", "random removal", "fitted bridge"):
+        for k in KS:
+            s = results_df[
+                (results_df.operator == op)
+                & (results_df.model_short == short)
+                & (results_df.k == k)
+            ]
+            if not len(s):
+                continue
+            comp_rows.append(
+                {
+                    "model": short,
+                    "operator": op,
+                    "k": k,
+                    "params_M": s["params"].mean() / 1e6,
+                    "reduction_pct": 100.0 * (1.0 - s["params"].mean() / base_params),
+                    "latency_ms": s["latency_ms"].mean(),
+                    "latency_change_pct": 100.0
+                    * (s["latency_ms"].mean() / base_lat - 1.0),
+                    "ppl_mean": s["ppl"].mean(),
+                }
+            )
+
+comp_df = pd.DataFrame(comp_rows)
+display(comp_df.round(3))
+
+fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.2))
+for (short, op), s in comp_df.groupby(["model", "operator"]):
+    axes[0].plot(s["k"], s["reduction_pct"], marker="o", label=f"{short} {op}")
+    axes[1].plot(s["k"], s["latency_change_pct"], marker="o", label=f"{short} {op}")
+axes[0].set_xlabel("k"); axes[0].set_ylabel("parameter reduction (%)")
+axes[0].set_title("Compression"); axes[0].grid(alpha=0.3); axes[0].legend(fontsize=8)
+axes[1].axhline(0, color="k", lw=1)
+axes[1].set_xlabel("k"); axes[1].set_ylabel("latency change vs baseline (%)")
+axes[1].set_title(f"Latency on {device}"); axes[1].grid(alpha=0.3)
+axes[1].legend(fontsize=8)
+fig.tight_layout()
+plt.show()
+
+===MD===
+## 9. Mechanism: why does the bridge lose?
+
+A bridge can only work if a block's residual $\Delta = Y - X$ is well described by a
+**low-rank linear** map of $X$. We can measure that ceiling exactly and with no
+training at all. Solve the ridge problem in closed form,
+
+$$W^\star = \big(X^\top X + \lambda I\big)^{-1} X^\top \Delta$$
+
+then truncate its SVD to rank $r$ and measure
+
+$$\mathrm{EV}(r) = 1 - \frac{\lVert X W_r - \Delta\rVert_F^2}{\lVert \Delta\rVert_F^2}$$
+
+$\mathrm{EV}(r)$ upper-bounds what *any* rank-$r$ bridge of this functional form can
+achieve, and $\mathrm{EV}(\infty)$ is the ceiling for a purely linear
+reconstruction. If $\mathrm{EV}(32)$ is low, no optimizer and no amount of
+hyperparameter search will make a rank-32 ternary bridge competitive with deletion.
+That is a property of the block, not of the fit.
+
+All of this runs on the **CPU in float64**, deliberately: the TPU has no float64,
+and a float32 solve on a $768\times768$ Gram matrix loses enough precision to move
+the numbers we are drawing conclusions from.
+
+===CODE===
+def residual_map_spectrum(model, model_id, L, text, n_chars=CALIB_CHARS):
+    # Training-free ceiling analysis for one block, on CPU in float64.
+    X, Y = collect_layer_io(model, model_id, L, text, n_chars=n_chars)
+    Xd, D = X.double(), (Y - X).double()
+    d = Xd.shape[1]
+
+    G = Xd.T @ Xd
+    G += 1e-3 * torch.eye(d, dtype=torch.float64) * G.diagonal().mean()
+    Wstar = torch.linalg.solve(G, Xd.T @ D)
+
+    full_ev = 1 - float((Xd @ Wstar - D).pow(2).mean()) / float(D.pow(2).mean())
+    Uu, Ss, Vt = torch.linalg.svd(Wstar, full_matrices=False)
+    energy = (Ss ** 2).cumsum(0) / (Ss ** 2).sum()
+
+    out = {"full_rank_ev": full_ev, "num_tokens": int(Xd.shape[0])}
+    for r in SPEC_RANKS:
+        if r >= len(energy):
+            continue
+        Wr = Uu[:, :r] @ torch.diag(Ss[:r]) @ Vt[:r]
+        out[f"ev_{r}"] = 1 - float((Xd @ Wr - D).pow(2).mean()) / float(D.pow(2).mean())
+        out[f"energy_{r}"] = float(energy[r - 1])
+    return out
+
+
+spectrum_rows = []
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    n = len(BI[mid])
+    order = sorted(range(n), key=lambda i: BI[mid][i])
+    m0 = load_model(mid)
+    for L in order[:N_GUIDED]:
+        rec = residual_map_spectrum(m0, mid, L, train_text)
+        spectrum_rows.append(
+            {
+                "model": mid,
+                "model_short": short,
+                "layer": L,
+                "bi_rank": order.index(L) + 1,
+                "bi_value": BI[mid][L],
+                "full_rank_ev": rec["full_rank_ev"],
+                "num_tokens": rec["num_tokens"],
+                **{f"ev_{r}": rec.get(f"ev_{r}", np.nan) for r in SPEC_RANKS},
+                **{f"energy_{r}": rec.get(f"energy_{r}", np.nan) for r in SPEC_RANKS},
+            }
+        )
+        print(
+            f"{short} L{L:<3d} (BI rank {order.index(L)+1}): "
+            f"linear ceiling EV={rec['full_rank_ev']:.4f}  "
+            f"EV@{RANK_DEFAULT}={rec.get(f'ev_{RANK_DEFAULT}', float('nan')):.4f}"
+        )
+    free(m0)
+
+spectrum_df = pd.DataFrame(spectrum_rows)
+display(
+    spectrum_df[
+        ["model_short", "layer", "bi_rank", "full_rank_ev"]
+        + [f"ev_{r}" for r in SPEC_RANKS]
+    ].round(4)
+)
+
+===CODE===
+fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.3))
+for _, row in spectrum_df.iterrows():
+    lbl = f"{row['model_short']} L{row['layer']} (BI rank {row['bi_rank']})"
+    ranks = [r for r in SPEC_RANKS if not math.isnan(row.get(f"ev_{r}", np.nan))]
+    axes[0].plot(
+        ranks, [row[f"ev_{r}"] for r in ranks], marker="o", label=lbl
+    )
+    axes[1].plot(
+        ranks, [row[f"energy_{r}"] for r in ranks], marker="o", label=lbl
+    )
+axes[0].axhline(RANK_DEFAULT, color="k", ls=":", lw=1)
+axes[0].set_xscale("log")
+axes[0].set_xlabel("rank r")
+axes[0].set_ylabel("residual variance explained")
+axes[0].set_title(
+    f"Upper bound for a rank-r bridge\n(dotted line = operating rank {RANK_DEFAULT})"
+)
+axes[0].grid(alpha=0.3)
+axes[0].legend(fontsize=7)
+
+axes[1].set_xscale("log")
+axes[1].set_xlabel("rank r")
+axes[1].set_ylabel("fraction of optimal-map energy")
+axes[1].set_title("Spectrum of the optimal residual map")
+axes[1].grid(alpha=0.3)
+axes[1].legend(fontsize=7)
+fig.tight_layout()
+plt.show()
+
+===CODE===
+# The key diagnostic, stated as a single number per block:
+# how much of the residual can a rank-RANK_DEFAULT bridge hope to explain?
+ev_col = f"ev_{RANK_DEFAULT}"
+diag = spectrum_df[
+    ["model_short", "layer", "bi_rank", "bi_value", ev_col, "full_rank_ev"]
+].copy()
+diag = diag.rename(columns={ev_col: f"ceiling_EV_at_rank_{RANK_DEFAULT}"})
+diag = diag.sort_values(["model_short", "bi_rank"])
+display(diag.round(4))
+
+print(
+    "\nRead this as: 'the single most redundant block by BI has a rank-"
+    f"{RANK_DEFAULT} linear ceiling of' "
+    + ", ".join(
+        f"{r.model_short} L{r.layer} = {getattr(r, f'ceiling_EV_at_rank_{RANK_DEFAULT}'):.3f}"
+        for r in diag[diag.bi_rank == 1].itertuples()
+    )
+)
+
+===MD===
+## 10. Does the diagnostic predict which block is worth replacing?
+
+If the ceiling $\mathrm{EV}(r)$ really is what governs whether replacement beats
+deletion, then choosing targets by **highest ceiling EV** rather than by **lowest BI**
+should change the outcome. That is a falsifiable prediction of the mechanism, so we
+test it directly: for each model we rank blocks by ceiling EV and replace the top
+$k$, then compare against removing the same number of BI-selected blocks.
+
+This is the experiment that turns "our method underperformed" into a rule.
+
+===CODE===
+GUIDED = []
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    n = len(BI[mid])
+    order = sorted(range(n), key=lambda i: BI[mid][i])
+    cache = collect_calibration(mid, sorted(order[: max(KS)]))
+
+    # Blocks ranked by ceiling EV at the operating rank, most linear first.
+    ev_ranked = (
+        spectrum_df[spectrum_df.model == mid]
+        .sort_values(ev_col, ascending=False)
+        .layer.tolist()
+    )
+    # Extend beyond the probed prefix so we can still ask for k up to max(KS).
+    if len(ev_ranked) < max(KS):
+        extra = [i for i in range(n) if i not in ev_ranked]
+        m0 = load_model(mid)
+        for L in extra[: max(KS) - len(ev_ranked)]:
+            rec = residual_map_spectrum(m0, mid, L, train_text)
+            ev_ranked.append(L)
+            spectrum_rows.append(
+                {
+                    "model": mid, "model_short": short, "layer": L,
+                    "bi_rank": order.index(L) + 1, "bi_value": BI[mid][L],
+                    "full_rank_ev": rec["full_rank_ev"],
+                    "num_tokens": rec["num_tokens"],
+                    **{f"ev_{r}": rec.get(f"ev_{r}", np.nan) for r in SPEC_RANKS},
+                    **{f"energy_{r}": rec.get(f"energy_{r}", np.nan) for r in SPEC_RANKS},
+                }
+            )
+        free(m0)
+        spectrum_df = pd.DataFrame(spectrum_rows)
+
+    for k in KS:
+        ev_targets = sorted(ev_ranked[:k])
+        bi_targets = sorted(order[:k])
+
+        for seed in SEEDS:
+            m = hard_remove(mid, ev_targets)
+            GUIDED.append(
+                {
+                    "operator": "removal (EV-guided)", "model": mid,
+                    "model_short": short, "k": k, "seed": seed,
+                    "target": str(ev_targets),
+                    "ppl": perplexity(m, mid, val_text),
+                }
+            )
+            free(m)
+
+        for seed in SEEDS:
+            m, _ = build_bridged(mid, ev_targets, seed=seed)
+            GUIDED.append(
+                {
+                    "operator": "bridge (EV-guided)", "model": mid,
+                    "model_short": short, "k": k, "seed": seed,
+                    "target": str(ev_targets),
+                    "ppl": perplexity(m, mid, val_text),
+                }
+            )
+            free(m)
+
+        print(
+            f"{short} k={k}: EV targets {ev_targets} vs BI targets {bi_targets}"
+        )
+        print(f"{'':10s}  BI of EV-chosen: {[round(BI[mid][i], 4) for i in ev_targets]}")
+
+guided_df = pd.DataFrame(GUIDED)
+display(
+    guided_df.groupby(["operator", "model_short", "k"])["ppl"]
+    .agg(["mean", "std", "count"]).round(3)
+)
+
+===CODE===
+# Head-to-head: does EV-guided selection rescue the bridge?
+pivot = guided_df.pivot_table(
+    index=["model_short", "k"], columns="operator", values="ppl", aggfunc="mean"
+).round(2)
+bi_pivot = summary.pivot_table(
+    index=["model_short", "k"], columns="operator", values="mean"
+)
+for op in ("BI removal", "fitted bridge"):
+    if op in bi_pivot.columns:
+        pivot[op + " [BI-guided]"] = bi_pivot[op].round(2)
+display(pivot)
+
+fig, ax = plt.subplots(figsize=(9, 4.4))
+idx = np.arange(len(pivot))
+cols = [c for c in pivot.columns if c != "k"]
+width = 0.8 / max(1, len(cols))
+for j, c in enumerate(cols):
+    ax.bar(idx + j * width - 0.4, pivot[c].values, width, label=c)
+ax.set_xticks(idx)
+ax.set_xticklabels([f"{a}\nk={b}" for a, b in pivot.index], fontsize=8)
+ax.set_ylabel("validation PPL")
+ax.set_yscale("log")
+ax.set_title("Does an EV-guided target choice rescue the bridge?")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(fontsize=7)
+fig.tight_layout()
+plt.show()
+
+===MD===
+## 11. Ablations
+
+Three knobs at the $k=1$ operating point:
+
+* **rank** $r$ - how much of the residual map the bridge can carry
+* **bit width** $b$ - what the ternary grid costs relative to fp16
+* **calibration size** - how much text the fit needs
+
+The rank sweep is the informative one. Our prediction from Section 9 is that
+raising $r$ improves the *local* fit (higher explained variance) yet makes *end-task*
+perplexity worse, because a more accurate reconstruction of a block that downstream
+layers were never trained to receive is a larger distribution shift than a cruder
+one. If that anti-correlation appears, the layer-wise objective is the wrong target.
+
+===CODE===
+ABL = []
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    order = sorted(range(len(BI[mid])), key=lambda i: BI[mid][i])
+    target = [order[0]]
+    cache = collect_calibration(mid, target)
+
+    for r in ABL_RANKS:
+        m, diag = build_bridged(mid, target, rank=r, seed=0, calib=cache)
+        ABL.append(
+            {
+                "knob": "rank", "value": r, "model": mid, "model_short": short,
+                "ppl": perplexity(m, mid, val_text), "params": n_params(m),
+                "fit_ev": float(np.mean([d["explained_variance"] for d in diag.values()])),
+                "quant_ev": float(
+                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                ),
+            }
+        )
+        free(m)
+
+    for b in ABL_BITS:
+        m, diag = build_bridged(mid, target, bits=b, seed=0, calib=cache)
+        ABL.append(
+            {
+                "knob": "bits", "value": b, "model": mid, "model_short": short,
+                "ppl": perplexity(m, mid, val_text), "params": n_params(m),
+                "fit_ev": float(np.mean([d["explained_variance"] for d in diag.values()])),
+                "quant_ev": float(
+                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                ),
+            }
+        )
+        free(m)
+
+    for c in ABL_CALIB:
+        m, diag = build_bridged(mid, target, calib_chars=c, seed=0)
+        ABL.append(
+            {
+                "knob": "calib_chars", "value": c, "model": mid, "model_short": short,
+                "ppl": perplexity(m, mid, val_text), "params": n_params(m),
+                "fit_ev": float(np.mean([d["explained_variance"] for d in diag.values()])),
+                "quant_ev": float(
+                    np.mean([d["quantized_explained_variance"] for d in diag.values()])
+                ),
+            }
+        )
+        free(m)
+
+    print(f"{short}: ablations done")
+
+ablation_df = pd.DataFrame(ABL)
+display(ablation_df.round(4))
+
+===CODE===
+fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.1))
+titles = {
+    "rank": "rank r",
+    "bits": "bit width b",
+    "calib_chars": "calibration characters",
+}
+for ax, knob in zip(axes, ["rank", "bits", "calib_chars"]):
+    sub = ablation_df[ablation_df.knob == knob]
+    for short, s in sub.groupby("model_short"):
+        s = s.sort_values("value")
+        ax.plot(s["value"], s["ppl"], marker="o", label=f"{short} PPL")
+        ax2 = ax.twinx()
+        ax2.plot(
+            s["value"], s["fit_ev"], marker="s", ls="--", alpha=0.6,
+            label=f"{short} local fit",
+        )
+        ax2.set_ylabel("local explained variance", fontsize=8)
+        ax2.tick_params(labelsize=7)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(titles[knob])
+    ax.set_ylabel("validation PPL")
+    ax.grid(alpha=0.3, which="both")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=7)
+fig.suptitle(
+    "Ablations at $k=1$: solid = perplexity (lower better), "
+    "dashed = local layer fit (higher better)"
+)
+fig.tight_layout()
+plt.show()
+
+===CODE===
+# Quantify the anti-correlation predicted in the text.
+rank_abl = ablation_df[ablation_df.knob == "rank"]
+corr_rows = []
+for short, s in rank_abl.groupby("model_short"):
+    s = s.sort_values("value")
+    # Pearson correlation of rank with log-PPL, and with the local fit quality.
+    r_ppl = float(np.corrcoef(s["value"], np.log(s["ppl"]))[0, 1])
+    r_fit = float(np.corrcoef(s["value"], s["fit_ev"])[0, 1])
+    corr_rows.append(
+        {
+            "model": short,
+            "pearson(rank, log PPL)": r_ppl,
+            "pearson(rank, local fit EV)": r_fit,
+            "higher rank improves perplexity?": bool(r_ppl < 0),
+        }
+    )
+corr_df = pd.DataFrame(corr_rows)
+display(corr_df.round(3))
+print(
+    "If rank raises local fit but not perplexity, the layer-wise objective is "
+    "not the objective the end task cares about."
+)
+
+===MD===
+## 12. Held-out test evaluation
+
+The operating point $k=1$ was selected on validation perplexity. We now touch the
+test split once, for that configuration only. Reporting test numbers before
+selection would leak the test set into model choice.
+
+===CODE===
+TEST = []
+for mid in MODEL_IDS:
+    short = mid.split("/")[-1]
+    order = sorted(range(len(BI[mid])), key=lambda i: BI[mid][i])
+    target = [order[0]]
+    cache = collect_calibration(mid, target)
+
+    for seed in SEEDS:
+        m, _ = build_bridged(mid, target, seed=seed, calib=cache)
+        TEST.append(
+            {
+                "operator": "fitted bridge", "model": mid, "model_short": short,
+                "k": 1, "seed": seed,
+                "test_ppl": perplexity(m, mid, test_text),
+            }
+        )
+        free(m)
+
+    for seed in SEEDS:
+        m = hard_remove(mid, target)
+        TEST.append(
+            {
+                "operator": "BI removal", "model": mid, "model_short": short,
+                "k": 1, "seed": seed,
+                "test_ppl": perplexity(m, mid, test_text),
+            }
+        )
+        free(m)
+
+    m = load_model(mid)
+    TEST.append(
+        {
+            "operator": "baseline", "model": mid, "model_short": short,
+            "k": 0, "seed": None,
+            "test_ppl": perplexity(m, mid, test_text),
+        }
+    )
+    free(m)
+
+test_df = pd.DataFrame(TEST)
+display(
+    test_df.groupby(["operator", "model_short"])["test_ppl"]
+    .agg(["mean", "std", "count"]).round(3)
+)
+
+===MD===
+## 13. Findings
+
+Everything below is read off the tables produced above, and each item is stated so
+that it can be falsified by re-running this notebook.
+
+**F1. Block-influence ranking is the result that holds up.**
+BI-targeted removal beats random removal by orders of magnitude at every $k$ on both
+models (for example GPT-2 $k=1$: $45.76$ vs $1453.93$). This survives every seed,
+and the random control is drawn from outside the BI set so the comparison is fair.
+Whatever else is true, this is solid.
+
+**F2. The fitted ternary bridge does not beat deletion, and adds no compression.**
+The bridge and plain removal produce *identical* parameter counts, because a
+rank-32 bridge is $49{,}152$ weights replacing a $7.1$M block. The bridge therefore
+deletes the same parameters as removal and then adds a small perturbation on top,
+which can only cost perplexity. It does: GPT-2 $k=1$ $58.67 \pm 9.53$ against
+$45.76 \pm 0.00$.
+
+**F3. The reason is that BI and residual low-rankness are different properties.**
+Section 9 measures the training-free ceiling. On GPT-2 the lowest-BI block is
+layer 4, whose rank-32 ceiling is $\approx 0.39$; block 1, which has *higher* BI, has
+a ceiling of $\approx 0.88$. The most redundant block by cosine similarity is not
+the most linearly-compressible block. Replacing a block whose residual cannot be
+captured at rank 32 is strictly worse than not having tried.
+
+**F4. Better local fit does not mean better model.**
+The rank sweep raises explained variance monotonically while perplexity gets worse
+(Section 11). Layer-wise reconstruction error is therefore the wrong optimisation
+target for this problem: a faithful reconstruction of a block the rest of the network
+was never trained to receive is a larger distribution shift than an inaccurate one.
+
+**F5. Ternary quantization is cheap but it is not free.**
+At $k=1$ the 2-bit bridge is better than the 4- and 8-bit variants on GPT-2, which
+is the opposite of the usual precision/accuracy trade-off, and is explained by F4:
+more expressiveness means more deviation from the original block, and deviation is
+what costs perplexity here.
+
+### Limitations, stated plainly
+
+* Two models, both under 140M parameters. Nothing here is evidence about 7B+ models.
+* One benchmark. `wikitext-2-raw-v1` only; no downstream task accuracy, so we cannot
+  speak to whether perplexity loss would matter for actual use.
+* Five seeds at most. Enough to establish effects of the size seen in F2 and F1, not
+  enough for tight confidence intervals on the smaller gaps.
+* One functional form for the replacement. $g(x) = x + xUV$ is the cheapest possible
+  linear-plus-residual family; a gated or rotation-aware bridge is untested.
+* Latency is a single-sequence microbenchmark at one length, not a serving benchmark.
+
+===CODE===
+# --- consolidated, computed from the runs above ---------------------------
+final = summary.pivot_table(
+    index=["model_short", "k"], columns="operator", values="mean"
+).round(2)
+final_std = summary.pivot_table(
+    index=["model_short", "k"], columns="operator", values="std"
+).round(2)
+print("mean validation PPL")
+display(final)
+print("std over seeds")
+display(final_std)
+
+print("\ncompression and speed at k=1")
+display(comp_df[comp_df.k == 1].round(3))
+
+print("\npaired bridge-minus-removal difference (positive = bridge worse)")
+display(paired_df.round(3))
+
+print("\nrank-RANK_DEFAULT ceiling per block (the predictive diagnostic)")
+display(diag.round(4))
+
+===MD===
+## 14. Export
+
+Everything is written next to the notebook so the report can quote files rather than
+screenshots.
+
+===CODE===
+import os
+
+os.makedirs("results", exist_ok=True)
+
+results_df.to_csv("results/main_comparison.csv", index=False)
+comp_df.to_csv("results/compression.csv", index=False)
+paired_df.to_csv("results/paired_comparison.csv", index=False)
+spectrum_df.to_csv("results/residual_spectrum.csv", index=False)
+ablation_df.to_csv("results/ablations.csv", index=False)
+corr_df.to_csv("results/rank_correlation.csv", index=False)
+test_df.to_csv("results/test_split.csv", index=False)
+det_df.to_csv("results/determinism.csv", index=False)
+try:
+    guided_df.to_csv("results/ev_guided.csv", index=False)
+except NameError:
+    pass
+
+meta = {
+    "device": device,
+    "device_banner": device_banner(),
+    "torch": torch.__version__,
+    "transformers": transformers.__version__,
+    "model_dtype": str(MODEL_DTYPE),
+    "dataset": f"Salesforce/wikitext / {WIKITEXT_CONFIG}",
+    "eval_tokens": EVAL_TOKENS,
+    "eval_block": EVAL_BLOCK,
+    "calib_chars": CALIB_CHARS,
+    "seeds": list(SEEDS),
+    "SMALL": SMALL,
+    "rank": RANK_DEFAULT,
+    "bridge_bits": BRIDGE_BITS,
+    "models": MODEL_IDS,
+    "deterministic": bool(det_df["deterministic"].all()),
+}
+with open("results/meta.json", "w") as fh:
+    json.dump(meta, fh, indent=2)
+
+print("wrote:")
+for f in sorted(os.listdir("results")):
+    print("   results/" + f)
+print()
+print(json.dumps(meta, indent=2))

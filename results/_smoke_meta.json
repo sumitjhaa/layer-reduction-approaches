@@ -1,0 +1,16 @@
+{
+  "device": "mps",
+  "dataset": [
+    "Salesforce/wikitext",
+    "wikitext-2-raw-v1"
+  ],
+  "eval_tokens": 3000,
+  "eval_block": 256,
+  "calib_chars": 4000,
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "torch": "2.14.1"
+}
