@@ -1,0 +1,546 @@
+device=mps  torch=2.14.1
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+=== A: KD repair of the BI-pruned model ===
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 27271.64it/s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 20075.58it/s]
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (22056 > 1024). Running this sequence through the model will result in indexing errors
+[transformers] `loss_type=None` was set in the config but it is unrecognized. Using the default loss: `ForCausalLMLoss`.
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 17305.74it/s]
+      step    0 loss=91.1825 ce=4.1444 kl=178.22073
+      step   25 loss=68.9665 ce=4.3225 kl=133.61041
+      step   50 loss=41.5381 ce=3.7955 kl=79.28070
+      step   75 loss=38.1589 ce=4.3696 kl=71.94834
+      step  100 loss=40.7572 ce=3.5558 kl=77.95859
+      step  125 loss=34.8416 ce=3.6159 kl=66.06721
+      step  150 loss=46.2186 ce=4.1468 kl=88.29045
+      step  175 loss=37.3340 ce=4.1477 kl=70.52023
+      step  200 loss=41.1037 ce=4.3279 kl=77.87949
+      step  225 loss=30.1877 ce=3.7194 kl=56.65606
+      step  250 loss=33.6251 ce=4.4428 kl=62.80743
+      step  275 loss=30.6349 ce=3.4049 kl=57.86491
+      step  300 loss=34.9224 ce=3.6337 kl=66.21114
+      step  325 loss=29.8388 ce=4.0927 kl=55.58488
+      step  350 loss=35.8835 ce=4.1171 kl=67.64998
+      step  375 loss=45.5966 ce=3.9256 kl=87.26770
+  A gpt2           k=1 s=0  38.25 -> 45.76 -> 41.93   recovered  51.0%  [135s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 13119.39it/s]
+      step    0 loss=88.9940 ce=4.5564 kl=173.43167
+      step   25 loss=49.4106 ce=4.0663 kl=94.75488
+      step   50 loss=42.7912 ce=4.2089 kl=81.37358
+      step   75 loss=44.3924 ce=4.3166 kl=84.46822
+      step  100 loss=38.7541 ce=3.6818 kl=73.82630
+      step  125 loss=38.5284 ce=3.7727 kl=73.28410
+      step  150 loss=34.6950 ce=4.1416 kl=65.24829
+      step  175 loss=36.0510 ce=3.6434 kl=68.45859
+      step  200 loss=72.9525 ce=3.8151 kl=142.08997
+      step  225 loss=34.3298 ce=4.1433 kl=64.51630
+      step  250 loss=33.0674 ce=3.5387 kl=62.59605
+      step  275 loss=41.7790 ce=3.9145 kl=79.64351
+      step  300 loss=37.6651 ce=3.9105 kl=71.41960
+      step  325 loss=30.0565 ce=4.0647 kl=56.04838
+      step  350 loss=32.6170 ce=3.8920 kl=61.34196
+      step  375 loss=31.4640 ce=4.3981 kl=58.52993
+  A gpt2           k=1 s=1  38.25 -> 45.76 -> 41.86   recovered  51.9%  [155s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12782.77it/s]
+      step    0 loss=97.2506 ce=4.1170 kl=190.38416
+      step   25 loss=59.2803 ce=4.5187 kl=114.04196
+      step   50 loss=69.9672 ce=3.6582 kl=136.27621
+      step   75 loss=54.0291 ce=3.9180 kl=104.14027
+      step  100 loss=43.3479 ce=3.7030 kl=82.99273
+      step  125 loss=31.5688 ce=3.8941 kl=59.24355
+      step  150 loss=31.1648 ce=3.5577 kl=58.77197
+      step  175 loss=48.8677 ce=4.0286 kl=93.70689
+      step  200 loss=37.3210 ce=4.3856 kl=70.25628
+      step  225 loss=31.0418 ce=3.8036 kl=58.27991
+      step  250 loss=33.9717 ce=3.5520 kl=64.39139
+      step  275 loss=36.6380 ce=4.4374 kl=68.83861
+      step  300 loss=35.7118 ce=3.8393 kl=67.58427
+      step  325 loss=38.0492 ce=4.6036 kl=71.49483
+      step  350 loss=27.5268 ce=3.7035 kl=51.35005
+      step  375 loss=28.6972 ce=3.4764 kl=53.91789
+  A gpt2           k=1 s=2  38.25 -> 45.76 -> 41.25   recovered  60.0%  [163s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12475.52it/s]
+      step    0 loss=240.0734 ce=5.1140 kl=475.03278
+      step   25 loss=117.8836 ce=4.4635 kl=231.30370
+      step   50 loss=83.6728 ce=4.0510 kl=163.29460
+      step   75 loss=73.4959 ce=4.6577 kl=142.33420
+      step  100 loss=69.2933 ce=3.8329 kl=134.75359
+      step  125 loss=56.6436 ce=3.7720 kl=109.51534
+      step  150 loss=92.4045 ce=4.6597 kl=180.14929
+      step  175 loss=58.9355 ce=4.2861 kl=113.58496
+      step  200 loss=57.5584 ce=4.4946 kl=110.62222
+      step  225 loss=46.3293 ce=3.8968 kl=88.76181
+      step  250 loss=48.5092 ce=4.4839 kl=92.53450
+      step  275 loss=49.4731 ce=3.6006 kl=95.34547
+      step  300 loss=50.2803 ce=3.7327 kl=96.82779
+      step  325 loss=45.9126 ce=4.1217 kl=87.70358
+      step  350 loss=48.8372 ce=4.2147 kl=93.45959
+      step  375 loss=58.2737 ce=4.0973 kl=112.45007
+  A gpt2           k=2 s=0  38.25 -> 47.95 -> 43.88   recovered  42.0%  [158s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12534.97it/s]
+      step    0 loss=172.2435 ce=5.2257 kl=339.26117
+      step   25 loss=97.6616 ce=4.4460 kl=190.87721
+      step   50 loss=79.5747 ce=4.5524 kl=154.59695
+      step   75 loss=79.5756 ce=4.4960 kl=154.65518
+      step  100 loss=70.5416 ce=3.8562 kl=137.22705
+      step  125 loss=64.2702 ce=3.8753 kl=124.66505
+      step  150 loss=53.4882 ce=4.2691 kl=102.70737
+      step  175 loss=52.4198 ce=3.7104 kl=101.12926
+      step  200 loss=96.8672 ce=3.7333 kl=190.00114
+      step  225 loss=54.9619 ce=4.2314 kl=105.69239
+      step  250 loss=53.4842 ce=3.7059 kl=103.26241
+      step  275 loss=64.1328 ce=4.0405 kl=124.22515
+      step  300 loss=67.3599 ce=4.1277 kl=130.59207
+      step  325 loss=44.9747 ce=4.2194 kl=85.73000
+      step  350 loss=46.7236 ce=4.0168 kl=89.43051
+      step  375 loss=45.8601 ce=4.4853 kl=87.23500
+  A gpt2           k=2 s=1  38.25 -> 47.95 -> 44.21   recovered  38.6%  [161s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12813.91it/s]
+      step    0 loss=188.5082 ce=4.7227 kl=372.29370
+      step   25 loss=121.2839 ce=5.1543 kl=237.41348
+      step   50 loss=95.3410 ce=3.9107 kl=186.77136
+      step   75 loss=97.4728 ce=4.2812 kl=190.66438
+      step  100 loss=72.2380 ce=3.9485 kl=140.52753
+      step  125 loss=58.3093 ce=4.1105 kl=112.50808
+      step  150 loss=55.8873 ce=3.6977 kl=108.07695
+      step  175 loss=86.5364 ce=4.2458 kl=168.82703
+      step  200 loss=55.0933 ce=4.5694 kl=105.61710
+      step  225 loss=46.8392 ce=3.8490 kl=89.82941
+      step  250 loss=49.9305 ce=3.7538 kl=96.10725
+      step  275 loss=56.0502 ce=4.5817 kl=107.51868
+      step  300 loss=45.6595 ce=3.8968 kl=87.42225
+      step  325 loss=58.4051 ce=4.6110 kl=112.19928
+      step  350 loss=39.7546 ce=3.8038 kl=75.70541
+      step  375 loss=48.7550 ce=3.6099 kl=93.90004
+  A gpt2           k=2 s=2  38.25 -> 47.95 -> 44.08   recovered  39.9%  [162s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:  57%|█████▋    | 156/272 [00:00<00:00, 1517.14it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 1737.55it/s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9681.85it/s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9861.19it/s]
+      step    0 loss=30.5577 ce=4.0379 kl=57.07741
+      step   25 loss=32.2848 ce=4.3242 kl=60.24538
+      step   50 loss=11.7114 ce=3.9808 kl=19.44209
+      step   75 loss=20.7089 ce=3.2907 kl=38.12712
+      step  100 loss=13.1622 ce=4.4287 kl=21.89575
+      step  125 loss=15.2595 ce=3.8945 kl=26.62449
+      step  150 loss=9.6668 ce=3.6068 kl=15.72689
+      step  175 loss=9.9675 ce=3.1831 kl=16.75194
+      step  200 loss=8.2939 ce=3.5996 kl=12.98822
+      step  225 loss=8.7404 ce=3.5445 kl=13.93623
+      step  250 loss=8.7947 ce=3.4270 kl=14.16238
+      step  275 loss=8.2524 ce=3.8036 kl=12.70113
+      step  300 loss=7.0142 ce=4.1466 kl=9.88182
+      step  325 loss=13.1663 ce=3.2013 kl=23.13130
+      step  350 loss=7.5592 ce=4.0253 kl=11.09309
+      step  375 loss=6.8701 ce=3.7134 kl=10.02689
+  A SmolLM-135M    k=1 s=0  16.36 -> 19.90 -> 18.60   recovered  36.9%  [208s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:   0%|          | 1/272 [00:00<00:27,  9.75it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 1679.17it/s]
+      step    0 loss=40.5912 ce=4.1501 kl=77.03226
+      step   25 loss=30.3832 ce=3.8069 kl=56.95960
+      step   50 loss=14.3928 ce=3.1923 kl=25.59326
+      step   75 loss=17.1318 ce=3.9372 kl=30.32644
+      step  100 loss=16.0671 ce=4.6147 kl=27.51961
+      step  125 loss=12.2070 ce=3.3283 kl=21.08569
+      step  150 loss=14.2649 ce=4.1902 kl=24.33952
+      step  175 loss=11.9595 ce=3.4194 kl=20.49957
+      step  200 loss=13.2540 ce=3.1903 kl=23.31767
+      step  225 loss=6.7105 ce=2.9791 kl=10.44194
+      step  250 loss=9.4341 ce=4.2887 kl=14.57948
+      step  275 loss=9.1118 ce=3.9838 kl=14.23985
+      step  300 loss=9.2764 ce=4.0179 kl=14.53486
+      step  325 loss=6.7725 ce=3.0137 kl=10.53131
+      step  350 loss=9.0490 ce=3.5149 kl=14.58310
+      step  375 loss=6.7844 ce=3.6704 kl=9.89847
+  A SmolLM-135M    k=1 s=1  16.36 -> 19.90 -> 18.67   recovered  34.9%  [207s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9503.21it/s]
+      step    0 loss=30.5913 ce=3.8860 kl=57.29660
+      step   25 loss=44.8251 ce=3.9096 kl=85.74068
+      step   50 loss=22.6678 ce=4.0450 kl=41.29060
+      step   75 loss=14.8792 ce=4.1067 kl=25.65164
+      step  100 loss=13.2667 ce=4.1162 kl=22.41718
+      step  125 loss=16.5621 ce=3.2690 kl=29.85518
+      step  150 loss=17.5483 ce=3.1963 kl=31.90031
+      step  175 loss=12.5675 ce=3.1297 kl=22.00530
+      step  200 loss=11.9098 ce=3.8364 kl=19.98320
+      step  225 loss=14.9365 ce=3.8881 kl=25.98498
+      step  250 loss=5.9142 ce=2.9198 kl=8.90862
+      step  275 loss=10.8360 ce=3.4427 kl=18.22927
+      step  300 loss=7.9105 ce=3.7113 kl=12.10970
+      step  325 loss=7.8853 ce=4.2203 kl=11.55022
+      step  350 loss=11.5209 ce=3.4957 kl=19.54604
+      step  375 loss=6.6021 ce=3.7848 kl=9.41938
+  A SmolLM-135M    k=1 s=2  16.36 -> 19.90 -> 18.74   recovered  32.9%  [218s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:   0%|          | 1/272 [00:00<00:43,  6.17it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 1093.18it/s]
+      step    0 loss=60.2347 ce=4.1659 kl=116.30350
+      step   25 loss=61.4599 ce=4.4497 kl=118.47005
+      step   50 loss=30.0157 ce=4.0866 kl=55.94487
+      step   75 loss=44.4450 ce=3.3815 kl=85.50856
+      step  100 loss=29.9113 ce=4.5230 kl=55.29962
+      step  125 loss=36.0143 ce=3.9893 kl=68.03935
+      step  150 loss=27.5217 ce=3.7073 kl=51.33612
+      step  175 loss=31.2204 ce=3.2845 kl=59.15634
+      step  200 loss=24.2220 ce=3.7110 kl=44.73307
+      step  225 loss=22.6995 ce=3.6071 kl=41.79179
+      step  250 loss=19.8039 ce=3.4836 kl=36.12432
+      step  275 loss=20.6262 ce=3.8629 kl=37.38960
+      step  300 loss=20.5248 ce=4.1857 kl=36.86398
+      step  325 loss=27.8632 ce=3.2699 kl=52.45658
+      step  350 loss=23.8213 ce=4.1180 kl=43.52454
+      step  375 loss=18.3688 ce=3.8005 kl=32.93698
+  A SmolLM-135M    k=2 s=0  16.36 -> 25.89 -> 22.04   recovered  40.4%  [208s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 4649.83it/s]
+      step    0 loss=75.8503 ce=4.3681 kl=147.33257
+      step   25 loss=62.5102 ce=3.9760 kl=121.04436
+      step   50 loss=34.0746 ce=3.2683 kl=64.88088
+      step   75 loss=39.1939 ce=4.0243 kl=74.36357
+      step  100 loss=31.3470 ce=4.6849 kl=58.00916
+      step  125 loss=34.7332 ce=3.4462 kl=66.02017
+      step  150 loss=32.9529 ce=4.2522 kl=61.65365
+      step  175 loss=27.5929 ce=3.5062 kl=51.67954
+      step  200 loss=37.1498 ce=3.2843 kl=71.01533
+      step  225 loss=24.1129 ce=3.0592 kl=45.16662
+      step  250 loss=25.0202 ce=4.3742 kl=45.66626
+      step  275 loss=20.4310 ce=4.0438 kl=36.81829
+      step  300 loss=21.5223 ce=4.0927 kl=38.95190
+      step  325 loss=16.9314 ce=3.0362 kl=30.82652
+      step  350 loss=23.3704 ce=3.5774 kl=43.16336
+      step  375 loss=20.4338 ce=3.7076 kl=37.16008
+  A SmolLM-135M    k=2 s=1  16.36 -> 25.89 -> 22.15   recovered  39.2%  [206s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 3668.54it/s]
+      step    0 loss=68.9717 ce=4.0974 kl=133.84605
+      step   25 loss=81.0558 ce=4.1043 kl=158.00735
+      step   50 loss=50.4503 ce=4.1302 kl=96.77043
+      step   75 loss=37.1720 ce=4.1695 kl=70.17442
+      step  100 loss=32.0577 ce=4.2070 kl=59.90843
+      step  125 loss=38.9135 ce=3.3675 kl=74.45945
+      step  150 loss=44.4588 ce=3.3093 kl=85.60827
+      step  175 loss=32.2014 ce=3.1773 kl=61.22551
+      step  200 loss=25.6383 ce=3.9152 kl=47.36136
+      step  225 loss=34.9288 ce=3.9954 kl=65.86213
+      step  250 loss=21.9005 ce=2.9739 kl=40.82708
+      step  275 loss=26.3568 ce=3.5368 kl=49.17679
+      step  300 loss=22.2327 ce=3.7765 kl=40.68893
+      step  325 loss=21.7743 ce=4.2432 kl=39.30536
+      step  350 loss=23.7841 ce=3.5291 kl=44.03910
+      step  375 loss=18.2522 ce=3.8033 kl=32.70118
+  A SmolLM-135M    k=2 s=2  16.36 -> 25.89 -> 22.22   recovered  38.5%  [207s]
+
+=== B: LayerDrop training ===
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 7448.40it/s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 14348.12it/s]
+      step    0 loss=8.7819 kept=7/12
+      step   20 loss=5.8823 kept=8/12
+      step   40 loss=3.3770 kept=12/12
+      step   60 loss=3.7959 kept=11/12
+      step   80 loss=3.2813 kept=12/12
+      step  100 loss=3.7591 kept=11/12
+      step  120 loss=3.4210 kept=12/12
+      step  140 loss=2.9275 kept=12/12
+      step  160 loss=2.7730 kept=11/12
+      step  180 loss=7.5096 kept=10/12
+      step  200 loss=4.0749 kept=9/12
+      step  220 loss=7.4140 kept=9/12
+      step  240 loss=3.1233 kept=9/12
+      step  260 loss=2.9532 kept=12/12
+      step  280 loss=2.9648 kept=10/12
+      step  300 loss=2.5002 kept=12/12
+      step  320 loss=3.2752 kept=10/12
+      step  340 loss=3.5078 kept=10/12
+      step  360 loss=2.5939 kept=12/12
+      step  380 loss=3.2842 kept=9/12
+      step  400 loss=4.3758 kept=9/12
+      step  420 loss=6.9172 kept=9/12
+      step  440 loss=3.2475 kept=9/12
+      step  460 loss=2.6734 kept=9/12
+      step  480 loss=3.6124 kept=8/12
+  B gpt2           k=1 s=0  base=38.25 ppl=4408.14  [187s]
+  B gpt2           k=2 s=0  base=38.25 ppl=4057.41  [187s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 14025.87it/s]
+      step    0 loss=6.2554 kept=11/12
+      step   20 loss=3.8176 kept=12/12
+      step   40 loss=4.1673 kept=10/12
+      step   60 loss=4.7159 kept=9/12
+      step   80 loss=3.6351 kept=11/12
+      step  100 loss=3.8593 kept=11/12
+      step  120 loss=3.6608 kept=9/12
+      step  140 loss=4.9261 kept=6/12
+      step  160 loss=3.2913 kept=11/12
+      step  180 loss=2.7368 kept=11/12
+      step  200 loss=3.7902 kept=10/12
+      step  220 loss=3.6074 kept=10/12
+      step  240 loss=2.6038 kept=12/12
+      step  260 loss=7.2807 kept=9/12
+      step  280 loss=2.7953 kept=11/12
+      step  300 loss=2.7832 kept=12/12
+      step  320 loss=2.8092 kept=10/12
+      step  340 loss=3.6667 kept=10/12
+      step  360 loss=7.1703 kept=7/12
+      step  380 loss=3.4616 kept=10/12
+      step  400 loss=2.8610 kept=9/12
+      step  420 loss=2.2478 kept=12/12
+      step  440 loss=2.4881 kept=11/12
+      step  460 loss=2.7709 kept=12/12
+      step  480 loss=1.9444 kept=12/12
+  B gpt2           k=1 s=1  base=38.25 ppl=4578.62  [186s]
+  B gpt2           k=2 s=1  base=38.25 ppl=3117.79  [186s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 6855.03it/s]
+      step    0 loss=9.2802 kept=7/12
+      step   20 loss=8.3566 kept=9/12
+      step   40 loss=5.0576 kept=9/12
+      step   60 loss=3.8103 kept=10/12
+      step   80 loss=3.5018 kept=12/12
+      step  100 loss=8.4963 kept=10/12
+      step  120 loss=3.8441 kept=9/12
+      step  140 loss=7.8227 kept=9/12
+      step  160 loss=3.0296 kept=11/12
+      step  180 loss=3.4390 kept=10/12
+      step  200 loss=4.0604 kept=9/12
+      step  220 loss=7.2945 kept=8/12
+      step  240 loss=12.6122 kept=6/12
+      step  260 loss=2.8097 kept=12/12
+      step  280 loss=4.4027 kept=9/12
+      step  300 loss=3.7265 kept=9/12
+      step  320 loss=2.3850 kept=12/12
+      step  340 loss=4.2840 kept=8/12
+      step  360 loss=8.1517 kept=10/12
+      step  380 loss=2.5658 kept=12/12
+      step  400 loss=2.4141 kept=11/12
+      step  420 loss=2.5962 kept=10/12
+      step  440 loss=2.3686 kept=11/12
+      step  460 loss=2.5655 kept=11/12
+      step  480 loss=2.6467 kept=11/12
+  B gpt2           k=1 s=2  base=38.25 ppl=3692.19  [192s]
+  B gpt2           k=2 s=2  base=38.25 ppl=3062.42  [192s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:   0%|          | 1/272 [00:00<01:02,  4.36it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 839.48it/s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9737.63it/s]
+      step    0 loss=14.7696 kept=25/30
+      step   20 loss=5.0312 kept=26/30
+      step   40 loss=4.2217 kept=27/30
+      step   60 loss=4.1032 kept=26/30
+      step   80 loss=4.6818 kept=26/30
+      step  100 loss=4.7360 kept=24/30
+      step  120 loss=4.3788 kept=25/30
+      step  140 loss=3.6792 kept=27/30
+      step  160 loss=4.1270 kept=27/30
+      step  180 loss=5.0869 kept=25/30
+      step  200 loss=9.4978 kept=25/30
+      step  220 loss=9.8718 kept=27/30
+      step  240 loss=3.4342 kept=28/30
+      step  260 loss=2.7887 kept=28/30
+      step  280 loss=5.7977 kept=23/30
+      step  300 loss=2.9490 kept=26/30
+      step  320 loss=11.8194 kept=22/30
+      step  340 loss=2.6676 kept=27/30
+      step  360 loss=11.2774 kept=21/30
+      step  380 loss=3.6050 kept=28/30
+      step  400 loss=3.2989 kept=28/30
+      step  420 loss=4.6319 kept=24/30
+      step  440 loss=3.0104 kept=25/30
+      step  460 loss=3.0076 kept=27/30
+      step  480 loss=2.6213 kept=29/30
+  B SmolLM-135M    k=1 s=0  base=16.36 ppl=3734.99  [207s]
+  B SmolLM-135M    k=2 s=0  base=16.36 ppl=11273.12  [207s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:   0%|          | 1/272 [00:00<00:27,  9.98it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 1834.81it/s]
+      step    0 loss=12.6173 kept=27/30
+      step   20 loss=11.0798 kept=23/30
+      step   40 loss=4.6262 kept=23/30
+      step   60 loss=4.4974 kept=25/30
+      step   80 loss=3.8161 kept=26/30
+      step  100 loss=3.5395 kept=26/30
+      step  120 loss=6.5026 kept=20/30
+      step  140 loss=4.1996 kept=24/30
+      step  160 loss=3.7547 kept=26/30
+      step  180 loss=3.4493 kept=27/30
+      step  200 loss=4.1550 kept=24/30
+      step  220 loss=8.7835 kept=28/30
+      step  240 loss=3.2515 kept=26/30
+      step  260 loss=3.5376 kept=27/30
+      step  280 loss=4.3959 kept=27/30
+      step  300 loss=9.0051 kept=27/30
+      step  320 loss=9.5074 kept=25/30
+      step  340 loss=6.4655 kept=22/30
+      step  360 loss=3.2465 kept=29/30
+      step  380 loss=5.9848 kept=24/30
+      step  400 loss=9.0577 kept=25/30
+      step  420 loss=8.0982 kept=25/30
+      step  440 loss=2.8038 kept=26/30
+      step  460 loss=8.1000 kept=26/30
+      step  480 loss=4.2107 kept=25/30
+  B SmolLM-135M    k=1 s=1  base=16.36 ppl=3733.94  [208s]
+  B SmolLM-135M    k=2 s=1  base=16.36 ppl=14453.32  [208s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:   0%|          | 1/272 [00:00<00:30,  8.80it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 1903.35it/s]
+      step    0 loss=12.7825 kept=21/30
+      step   20 loss=5.0691 kept=25/30
+      step   40 loss=5.3257 kept=24/30
+      step   60 loss=5.2265 kept=23/30
+      step   80 loss=4.8715 kept=25/30
+      step  100 loss=6.4602 kept=23/30
+      step  120 loss=4.6231 kept=27/30
+      step  140 loss=9.4986 kept=23/30
+      step  160 loss=9.6357 kept=24/30
+      step  180 loss=4.3063 kept=25/30
+      step  200 loss=5.8640 kept=25/30
+      step  220 loss=3.1686 kept=27/30
+      step  240 loss=4.3967 kept=25/30
+      step  260 loss=9.4426 kept=25/30
+      step  280 loss=3.4101 kept=25/30
+      step  300 loss=4.8563 kept=21/30
+      step  320 loss=4.6838 kept=24/30
+      step  340 loss=3.5474 kept=26/30
+      step  360 loss=2.9775 kept=27/30
+      step  380 loss=3.7309 kept=28/30
+      step  400 loss=2.7582 kept=27/30
+      step  420 loss=3.5774 kept=24/30
+      step  440 loss=9.1011 kept=23/30
+      step  460 loss=3.0288 kept=27/30
+      step  480 loss=2.8741 kept=28/30
+  B SmolLM-135M    k=1 s=2  base=16.36 ppl=3913.67  [207s]
+  B SmolLM-135M    k=2 s=2  base=16.36 ppl=13824.32  [207s]
+
+=== C: learned soft gates ===
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 7212.15it/s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12905.28it/s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 14726.28it/s]
+      step    0 ce=4.4750 mean_gate=0.9522
+      step   20 ce=4.0614 mean_gate=0.9442
+      step   40 ce=3.6657 mean_gate=0.9344
+      step   60 ce=3.4910 mean_gate=0.9222
+      step   80 ce=4.2943 mean_gate=0.9076
+      step  100 ce=4.4284 mean_gate=0.8896
+      step  120 ce=4.2631 mean_gate=0.8682
+      step  140 ce=3.6980 mean_gate=0.8450
+      step  160 ce=4.0782 mean_gate=0.8178
+      step  180 ce=4.8041 mean_gate=0.7954
+      step  200 ce=3.6180 mean_gate=0.7710
+      step  220 ce=4.3252 mean_gate=0.7470
+      step  240 ce=4.0602 mean_gate=0.7264
+      step  260 ce=4.0717 mean_gate=0.7067
+      step  280 ce=4.1348 mean_gate=0.6867
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 13388.77it/s]
+  C gpt2           k=1 s=0  base=38.25 ppl=42.99  target=[2] BI=[4]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12502.15it/s]
+  C gpt2           k=2 s=0  base=38.25 ppl=56.13  target=[2, 5] BI=[1, 4]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 10517.38it/s]
+      step    0 ce=4.1757 mean_gate=0.9523
+      step   20 ce=4.4071 mean_gate=0.9444
+      step   40 ce=4.3902 mean_gate=0.9346
+      step   60 ce=3.8520 mean_gate=0.9221
+      step   80 ce=3.3895 mean_gate=0.9068
+      step  100 ce=3.5977 mean_gate=0.8881
+      step  120 ce=3.8283 mean_gate=0.8660
+      step  140 ce=3.8458 mean_gate=0.8412
+      step  160 ce=4.1242 mean_gate=0.8142
+      step  180 ce=4.5871 mean_gate=0.7855
+      step  200 ce=4.2474 mean_gate=0.7565
+      step  220 ce=3.8010 mean_gate=0.7332
+      step  240 ce=4.3834 mean_gate=0.7149
+      step  260 ce=4.0330 mean_gate=0.6965
+      step  280 ce=4.0039 mean_gate=0.6775
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 13137.99it/s]
+  C gpt2           k=1 s=1  base=38.25 ppl=45.52  target=[5] BI=[4]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12369.37it/s]
+  C gpt2           k=2 s=1  base=38.25 ppl=59.14  target=[5, 7] BI=[1, 4]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 13478.02it/s]
+      step    0 ce=4.4950 mean_gate=0.9522
+      step   20 ce=4.2946 mean_gate=0.9441
+      step   40 ce=3.9371 mean_gate=0.9345
+      step   60 ce=4.1695 mean_gate=0.9227
+      step   80 ce=3.8375 mean_gate=0.9075
+      step  100 ce=3.7128 mean_gate=0.8892
+      step  120 ce=4.2984 mean_gate=0.8685
+      step  140 ce=3.6848 mean_gate=0.8444
+      step  160 ce=3.7687 mean_gate=0.8172
+      step  180 ce=4.4077 mean_gate=0.7893
+      step  200 ce=4.0252 mean_gate=0.7595
+      step  220 ce=4.7275 mean_gate=0.7379
+      step  240 ce=4.1311 mean_gate=0.7228
+      step  260 ce=3.8354 mean_gate=0.7055
+      step  280 ce=4.2431 mean_gate=0.6884
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 12684.30it/s]
+  C gpt2           k=1 s=2  base=38.25 ppl=44.25  target=[7] BI=[4]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 14544.11it/s]
+  C gpt2           k=2 s=2  base=38.25 ppl=59.14  target=[5, 7] BI=[1, 4]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights:   0%|          | 1/272 [00:00<00:28,  9.59it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 1687.36it/s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9102.19it/s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9374.21it/s]
+      step    0 ce=2.9556 mean_gate=0.9521
+      step   20 ce=3.4334 mean_gate=0.9426
+      step   40 ce=3.1438 mean_gate=0.9307
+      step   60 ce=3.2487 mean_gate=0.9156
+      step   80 ce=3.5850 mean_gate=0.8967
+      step  100 ce=4.4317 mean_gate=0.8725
+      step  120 ce=3.6016 mean_gate=0.8436
+      step  140 ce=3.5859 mean_gate=0.8085
+      step  160 ce=4.2542 mean_gate=0.7690
+      step  180 ce=4.0620 mean_gate=0.7257
+      step  200 ce=3.4758 mean_gate=0.6844
+      step  220 ce=3.3257 mean_gate=0.6419
+      step  240 ce=2.8102 mean_gate=0.6124
+      step  260 ce=4.2185 mean_gate=0.5910
+      step  280 ce=3.4221 mean_gate=0.5738
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 8935.02it/s]
+  C SmolLM-135M    k=1 s=0  base=16.36 ppl=18.95  target=[20] BI=[2]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 8901.77it/s]
+  C SmolLM-135M    k=2 s=0  base=16.36 ppl=23.88  target=[20, 24] BI=[2, 27]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9003.00it/s]
+      step    0 ce=3.6593 mean_gate=0.9521
+      step   20 ce=3.1332 mean_gate=0.9425
+      step   40 ce=3.9000 mean_gate=0.9306
+      step   60 ce=3.3373 mean_gate=0.9157
+      step   80 ce=3.1476 mean_gate=0.8968
+      step  100 ce=3.2038 mean_gate=0.8731
+      step  120 ce=3.1222 mean_gate=0.8442
+      step  140 ce=4.2860 mean_gate=0.8097
+      step  160 ce=3.8719 mean_gate=0.7690
+      step  180 ce=3.9227 mean_gate=0.7256
+      step  200 ce=3.6210 mean_gate=0.6857
+      step  220 ce=3.9869 mean_gate=0.6474
+      step  240 ce=4.5390 mean_gate=0.6152
+      step  260 ce=4.0466 mean_gate=0.5883
+      step  280 ce=4.2093 mean_gate=0.5721
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 3846.82it/s]
+  C SmolLM-135M    k=1 s=1  base=16.36 ppl=19.77  target=[24] BI=[2]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 10800.44it/s]
+  C SmolLM-135M    k=2 s=1  base=16.36 ppl=26.48  target=[24, 25] BI=[2, 27]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9415.68it/s]
+      step    0 ce=3.7791 mean_gate=0.9522
+      step   20 ce=3.9502 mean_gate=0.9427
+      step   40 ce=4.7417 mean_gate=0.9311
+      step   60 ce=2.9399 mean_gate=0.9164
+      step   80 ce=3.2642 mean_gate=0.8974
+      step  100 ce=3.1064 mean_gate=0.8736
+      step  120 ce=4.5584 mean_gate=0.8442
+      step  140 ce=3.8993 mean_gate=0.8105
+      step  160 ce=3.5512 mean_gate=0.7701
+      step  180 ce=3.2238 mean_gate=0.7275
+      step  200 ce=3.5068 mean_gate=0.6847
+      step  220 ce=3.2404 mean_gate=0.6460
+      step  240 ce=3.4282 mean_gate=0.6139
+      step  260 ce=4.4455 mean_gate=0.5902
+      step  280 ce=3.5202 mean_gate=0.5771
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9147.52it/s]
+  C SmolLM-135M    k=1 s=2  base=16.36 ppl=18.95  target=[20] BI=[2]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9355.76it/s]
+  C SmolLM-135M    k=2 s=2  base=16.36 ppl=24.48  target=[20, 27] BI=[2, 27]
+
+=== D: attention-head pruning ===
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 6884.75it/s]
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 13523.53it/s]
+  D gpt2           prune=0%  base=38.25 ppl=38.25
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 15653.15it/s]
+  D gpt2           prune=12%  base=38.25 ppl=42.85
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 13310.97it/s]
+  D gpt2           prune=25%  base=38.25 ppl=2033.08
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 14273.56it/s]
+  D gpt2           prune=38%  base=38.25 ppl=3640.24
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 8137.37it/s]
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 8833.19it/s]
+  D SmolLM-135M    prune=0%  base=16.36 ppl=16.36
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9162.58it/s]
+  D SmolLM-135M    prune=12%  base=16.36 ppl=46.92
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 7219.48it/s]
+  D SmolLM-135M    prune=25%  base=16.36 ppl=102.70
+Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weights: 100%|██████████| 272/272 [00:00<00:00, 9300.31it/s]
+  D SmolLM-135M    prune=38%  base=16.36 ppl=1239.48
+
+wrote results/unrun_approaches.csv  (44 rows)
